@@ -1,0 +1,37 @@
+logging:
+  file: /root/obsidian-hermes-vault/projects/polymarket-5min-bot/logs/bot_20260319.log
+  level: INFO
+polymarket:
+  clob_api_url: https://clob.polymarket.com
+  gamma_api_url: https://gamma-api.polymarket.com
+  private_key: YOUR_PRIVATE_KEY
+  wallet_address: YOUR_WALLET_ADDRESS
+risk:
+  circuit_breaker_dd: 0.1
+  max_daily_loss: 0.05
+  max_position_size: 0.1
+strategies:
+  active:
+  - mean_reversion_5min
+  - toxicity_mm
+  mean_reversion_5min:
+    deviation_threshold: 0.08
+    ema_period: 20
+    imbalance_threshold: 0.3
+    kelly_fraction: 0.25
+    min_volume: 10000
+    timeframes:
+    - 5m
+    - 15m
+  toxicity_mm:
+    kelly_fraction: 0.2
+    max_position: 1000
+    spread_multiplier: 1.5
+    timeframes:
+    - 5m
+    - 15m
+    vpin_threshold: 0.6
+telegram:
+  bot_token: YOUR_BOT_TOKEN
+  chat_id: YOUR_CHAT_ID
+  enabled: true
