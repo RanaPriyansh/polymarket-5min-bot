@@ -1,5 +1,9 @@
 # Polymarket 5/15-Minute Bot
 
+[![GitHub](https://img.shields.io/badge/GitHub-000000?logo=github)](https://github.com/thielon-apps/polymarket-5min-bot)
+[![License](https://img.shields.io/github/license/thielon-apps/polymarket-5min-bot)](https://github.com/thielon-apps/polymarket-5min-bot/blob/main/LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/thielon-apps/polymarket-5min-bot)](https://github.com/thielon-apps/polymarket-5min-bot/commits/main)
+
 **Fast, automated trading on ultra-short-duration prediction markets.**
 
 ## Edges Implemented

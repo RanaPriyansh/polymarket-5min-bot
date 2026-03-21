@@ -16,4 +16,4 @@ RUN mkdir -p logs data
 ENV PYTHONUNBUFFERED=1
 
 # Entrypoint
-CMD ["python", "cli.py", "run", "--mode", "paper"]
+CMD ["python", "api_wrapper.py"]

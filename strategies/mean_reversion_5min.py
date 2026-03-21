@@ -7,7 +7,7 @@ Mean Reversion Strategy for 5/15-minute Polymarket YES/NO markets
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from market_data import OrderBook, PolymarketData
 

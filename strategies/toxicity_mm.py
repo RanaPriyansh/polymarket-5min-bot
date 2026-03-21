@@ -6,7 +6,7 @@ Toxicity-Aware Market Making for 5/15-minute markets
 """
 
 import numpy as np
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from market_data import OrderBook, PolymarketData
 
