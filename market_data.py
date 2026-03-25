@@ -82,7 +82,8 @@ class PolymarketData:
         self.orderbooks[market_id] = ob
         return ob
 
-    def calculate_imbalance(self, ob: OrderBook, outcome: str = "YES") -> float:
+    @staticmethod
+    def calculate_imbalance(ob: OrderBook, outcome: str = "YES") -> float:
         """Order book imbalance: (bids - asks) / (bids + asks) for top 10 levels."""
         if outcome == "YES":
             bids = sum(size for _, size in ob.yes_bids[:10])
@@ -97,7 +98,8 @@ class PolymarketData:
         imbalance = (bids - asks) / total
         return imbalance
 
-    def mid_price(self, ob: OrderBook, outcome: str = "YES") -> float:
+    @staticmethod
+    def mid_price(ob: OrderBook, outcome: str = "YES") -> float:
         """Mid price from best bid/ask."""
         if outcome == "YES":
             best_bid = ob.yes_bids[0][0] if ob.yes_bids else 0.0

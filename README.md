@@ -45,10 +45,12 @@ polymarket-5min-bot/
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Install dependencies locally
 
 ```bash
-cd /root/obsidian-hermes-vault/projects/polymarket-5min-bot
+cd /root/git-repos/polymarket-5min-bot
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -62,7 +64,20 @@ Edit `config.yaml` to adjust:
 - Kelly fraction (default 25%)
 - Max daily loss (5%) and drawdown breaker (10%)
 
-### 3. Collect historical data (optional but recommended)
+### 3. Offline smoke test / backtest
+
+The repo includes a small synthetic dataset so you can validate the offline path without touching live APIs:
+
+```bash
+source .venv/bin/activate
+python cli.py --help
+python cli.py backtest --data data/sample_backtest.csv
+python -m unittest discover -s tests -v
+```
+
+Start here before attempting any paper or live workflow.
+
+### 4. Collect historical data (optional)
 
 ```bash
 python scripts/collector.py
@@ -70,7 +85,7 @@ python scripts/collector.py
 # Data saved to data/collection_YYYYMMDD_HHMMSS.csv
 ```
 
-### 4. Backtest
+### 5. Backtest
 
 ```bash
 python cli.py backtest --data data/your_collection.csv
@@ -78,7 +93,7 @@ python cli.py backtest --data data/your_collection.csv
 
 This will simulate the mean reversion strategy and print stats: win rate, Sharpe, max drawdown, total PnL.
 
-### 5. Run Paper Trading
+### 6. Run Paper Trading
 
 ```bash
 python cli.py run --mode paper
@@ -90,7 +105,7 @@ The bot will:
 - Generate signals from active strategies
 - Print signals to console (no real orders placed)
 
-### 6. Go Live
+### 7. Go Live
 
 ```bash
 python cli.py run --mode live
@@ -101,7 +116,7 @@ python cli.py run --mode live
 - Private key configured in `.env` (test with small amount first!)
 - Understand the risks: prediction markets are volatile and bots can lose money fast.
 
-### 7. Deploy via Docker (recommended for VPS)
+### 8. Deploy via Docker (recommended for VPS)
 
 ```bash
 docker build -t pm5minbot .
@@ -154,5 +169,7 @@ Configure bot token and chat ID in `.env` or `config.yaml` to get real-time noti
 ## Development
 
 Logs in `logs/`. Metrics in `data/`. Live metrics endpoint coming soon.
+
+For the safest validation path in this repo, prefer the bundled offline backtest command above rather than starting collectors or trading loops.
 
 Happy hunting! 🎯

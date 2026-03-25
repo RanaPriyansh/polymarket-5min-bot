@@ -13,12 +13,19 @@ risk:
 strategies:
   active:
   - mean_reversion_5min
+  - shock_reversion
+  - dislocation_arb
+  - terminal_resolver
   - toxicity_mm
   mean_reversion_5min:
     deviation_threshold: 0.08
+    zscore_threshold: 1.75
+    max_spread_bps: 500
+    reference_capital: 1000
     ema_period: 20
     imbalance_threshold: 0.3
     kelly_fraction: 0.25
+    min_edge: 0.005
     min_volume: 10000
     timeframes:
     - 5m
@@ -31,6 +38,27 @@ strategies:
     - 5m
     - 15m
     vpin_threshold: 0.6
+  shock_reversion:
+    jump_zscore_threshold: 2.25
+    lookback_points: 20
+    max_spread_bps: 400
+    reference_capital: 1000
+    min_volume: 10000
+    kelly_fraction: 0.15
+  dislocation_arb:
+    min_volume: 10000
+    min_dislocation: 0.03
+    max_spread_bps: 500
+    reference_capital: 1000
+    kelly_fraction: 0.12
+  terminal_resolver:
+    max_seconds_to_resolution: 60
+    min_resolver_confidence: 0.5
+    max_spread_bps: 300
+    min_volume: 10000
+    min_imbalance: 0.2
+    reference_capital: 1000
+    kelly_fraction: 0.10
 telegram:
   bot_token: YOUR_BOT_TOKEN
   chat_id: YOUR_CHAT_ID
