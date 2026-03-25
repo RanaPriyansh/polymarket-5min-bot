@@ -15,7 +15,6 @@ strategies:
   - mean_reversion_5min
   - shock_reversion
   - dislocation_arb
-  - terminal_resolver
   - toxicity_mm
   mean_reversion_5min:
     deviation_threshold: 0.08

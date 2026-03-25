@@ -99,10 +99,19 @@ This will simulate the mean reversion strategy and print stats: win rate, Sharpe
 python cli.py run --mode paper
 ```
 
+Default paper-trading strategy set is intentionally conservative:
+- `mean_reversion_5min`
+- `shock_reversion`
+- `dislocation_arb`
+- `toxicity_mm`
+
+`terminal_resolver` stays opt-in until a true external-resolution feed is wired in.
+
 The bot will:
 - Scan Polymarket every minute for 5/15-minute active markets
 - Fetch order books for YES tokens
 - Generate signals from active strategies
+- Track broker-marked equity for circuit-breaker enforcement
 - Print signals to console (no real orders placed)
 
 ### 7. Go Live
@@ -110,6 +119,8 @@ The bot will:
 ```bash
 python cli.py run --mode live
 ```
+
+Important: live mode is still a guarded scaffold. Order-signing and venue token mapping must be completed before real money can trade.
 
 **Requirements:**
 - Wallet with sufficient USDC balance on Polygon
@@ -159,6 +170,8 @@ Configure bot token and chat ID in `.env` or `config.yaml` to get real-time noti
 - Expect 1-3 trades per market per day; not a high-frequency scalper.
 - Backtest thoroughly before risking real capital.
 - Polymarket API may have rate limits; the bot is polite (1 request/sec).
+- Paper fills now cross at touch prices rather than optimistic mid-price marks, but paper mode is still a simplification of the real venue.
+- The runtime only allows one directional strategy order per market per loop to avoid accidental strategy stacking.
 
 ## Legal & Compliance
 
