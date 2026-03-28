@@ -66,6 +66,10 @@ market_filter:
   max_days_to_resolution: 90.0
   extreme_low: 0.05
   extreme_high: 0.95
+paper:
+  initial_capital: 1000.0
+  restore_state: true
+  runtime_dir: data/runtime
 research:
   output_dir: data/research
   max_hypotheses: 3

@@ -94,13 +94,15 @@ def cli():
 @cli.command()
 @click.option('--mode', type=click.Choice(['backtest', 'paper', 'live']), default='paper', help='Execution mode')
 @click.option('--strategies', default='mean_reversion_5min,shock_reversion,dislocation_arb,toxicity_mm', help='Comma-separated active strategies')
-def run(mode, strategies):
+@click.option('--max-loops', type=int, default=0, help='Optional loop limit for tests/smoke runs. 0 means run forever.')
+def run(mode, strategies, max_loops):
     """Run the trading bot in specified mode."""
     from event_recorder import EventRecorder
     from execution import create_broker
     from market_data import PolymarketData
     from resolver_map import ResolverMap
     from risk import RiskManager
+    from runtime_telemetry import RuntimeTelemetryStore
     from strategies.dislocation_arb import ComplementaryDislocationStrategy
     from strategies.mean_reversion_5min import MeanReversion5Min
     from strategies.shock_reversion import ShockReversionStrategy
@@ -110,6 +112,11 @@ def run(mode, strategies):
     with CONFIG_PATH.open("r", encoding="utf-8") as handle:
         cfg = yaml.safe_load(handle)
     cfg["strategies"]["active"] = strategies.split(",")
+
+    paper_cfg = cfg.get("paper", {})
+    runtime_dir = REPO_ROOT / paper_cfg.get("runtime_dir", "data/runtime")
+    telemetry = RuntimeTelemetryStore(runtime_dir)
+    run_id = RuntimeTelemetryStore.make_run_id(mode)
 
     click.echo(f"Starting bot in {mode} mode with strategies: {strategies}")
     click.echo("Press Ctrl+C to stop.")
@@ -121,17 +128,34 @@ def run(mode, strategies):
             dislocation = ComplementaryDislocationStrategy(cfg)
             terminal_resolver = TerminalResolverStrategy(cfg)
             mm = ToxicityMM(cfg)
-            risk_mgr = RiskManager(cfg, initial_capital=1000.0)
+            risk_mgr = RiskManager(cfg, initial_capital=float(paper_cfg.get("initial_capital", 1000.0)))
             recorder = EventRecorder(REPO_ROOT / 'data' / 'market_events.csv')
             resolver_map = ResolverMap(REPO_ROOT / 'data' / 'resolver_map.json')
 
             executor = None
             if mode in ('paper', 'live'):
                 executor = create_broker(mode, cfg, md)
+                if mode == 'paper' and paper_cfg.get('restore_state', True):
+                    executor.restore_state(telemetry.load_paper_state())
                 await executor.__aenter__()
+
+            loop_count = 0
+            telemetry.append_event("runtime.started", {"run_id": run_id, "mode": mode, "strategies": cfg["strategies"]["active"]})
+            telemetry.update_status(
+                run_id=run_id,
+                mode=mode,
+                phase="starting",
+                loop_count=0,
+                markets_fetched=0,
+                markets_selected=0,
+                strategies=cfg["strategies"]["active"],
+                broker_summary={},
+                last_error="",
+            )
 
             try:
                 while True:
+                    loop_count += 1
                     markets_5m = await md.get_markets_by_duration(minutes=5)
                     markets_15m = await md.get_markets_by_duration(minutes=15)
                     all_markets = merge_unique_markets(markets_5m, markets_15m)
@@ -324,6 +348,7 @@ def run(mode, strategies):
                                     f"size {quote_yes.bid_size}"
                                 )
 
+                    positions = {}
                     if executor:
                         positions = await executor.refresh_positions()
                         if isinstance(positions, dict) and "equity" in positions:
@@ -331,16 +356,53 @@ def run(mode, strategies):
                         risk_report = risk_mgr.get_risk_report()
                         click.echo(f"Risk: Capital ${risk_report['capital']:.2f}, DD {risk_report['max_drawdown']:.2%}")
                         click.echo(f"Broker summary: {positions}")
+                    else:
+                        risk_report = risk_mgr.get_risk_report()
+
+                    telemetry.update_status(
+                        run_id=run_id,
+                        mode=mode,
+                        phase="running",
+                        loop_count=loop_count,
+                        markets_fetched=len(all_markets),
+                        markets_selected=len(selected_markets),
+                        strategies=cfg["strategies"]["active"],
+                        top_market=filter_summary["top_passed"][0] if filter_summary["top_passed"] else {},
+                        broker_summary=positions,
+                        risk_summary=risk_report,
+                        last_error="",
+                    )
+                    if mode == 'paper' and executor and hasattr(executor, 'snapshot_state'):
+                        telemetry.save_paper_state(executor.snapshot_state())
 
                     if risk_mgr.check_circuit_breakers():
+                        telemetry.append_event("runtime.circuit_breaker", {"run_id": run_id, "loop_count": loop_count})
+                        telemetry.update_status(phase="stopped", stop_reason="circuit_breaker")
                         click.echo("CIRCUIT BREAKER TRIGGERED — stopping trading")
+                        break
+
+                    if max_loops and loop_count >= max_loops:
+                        telemetry.append_event("runtime.max_loops_reached", {"run_id": run_id, "loop_count": loop_count})
+                        telemetry.update_status(phase="completed", stop_reason="max_loops")
                         break
 
                     await asyncio.sleep(60)
 
             except KeyboardInterrupt:
+                telemetry.append_event("runtime.interrupted", {"run_id": run_id, "loop_count": loop_count})
+                telemetry.update_status(phase="stopped", stop_reason="keyboard_interrupt")
                 click.echo("Shutting down...")
+            except Exception as exc:
+                telemetry.append_event("runtime.error", {"run_id": run_id, "loop_count": loop_count, "error": str(exc)})
+                telemetry.update_status(phase="error", last_error=str(exc))
+                raise
             finally:
+                final_status = telemetry.read_status()
+                if final_status.get("phase") == "running":
+                    telemetry.update_status(phase="stopped", stop_reason="loop_exited")
+                telemetry.append_event("runtime.stopped", {"run_id": run_id, "phase": telemetry.read_status().get("phase")})
+                if mode == 'paper' and executor and hasattr(executor, 'snapshot_state'):
+                    telemetry.save_paper_state(executor.snapshot_state())
                 if executor:
                     await executor.__aexit__(None, None, None)
 

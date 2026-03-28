@@ -8,7 +8,7 @@ Execution modes:
 """
 
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Dict, Optional
 
 import aiohttp
@@ -81,6 +81,43 @@ class PaperBroker(BaseBroker):
         self.realized_pnl = 0.0
         self.open_orders: Dict[str, OrderRecord] = {}
         self.last_marks: Dict[str, Dict[str, float]] = {}
+
+    def snapshot_state(self) -> Dict[str, object]:
+        return {
+            "mode": self.mode,
+            "initial_capital": self.initial_capital,
+            "cash": self.cash,
+            "realized_pnl": self.realized_pnl,
+            "positions": self.positions,
+            "last_marks": self.last_marks,
+            "orders": {order_id: asdict(order) for order_id, order in self.orders.items()},
+            "open_orders": list(self.open_orders.keys()),
+        }
+
+    def restore_state(self, state: Dict[str, object]):
+        if not state:
+            return
+        self.initial_capital = float(state.get("initial_capital", self.initial_capital))
+        self.cash = float(state.get("cash", self.cash))
+        self.realized_pnl = float(state.get("realized_pnl", self.realized_pnl))
+        self.positions = {
+            market_id: {outcome: float(size) for outcome, size in outcomes.items()}
+            for market_id, outcomes in (state.get("positions", {}) or {}).items()
+        }
+        self.last_marks = {
+            market_id: {outcome: float(mark) for outcome, mark in marks.items()}
+            for market_id, marks in (state.get("last_marks", {}) or {}).items()
+        }
+        self.orders = {
+            order_id: OrderRecord(**payload)
+            for order_id, payload in (state.get("orders", {}) or {}).items()
+        }
+        open_order_ids = set(state.get("open_orders", []) or [])
+        self.open_orders = {
+            order_id: order
+            for order_id, order in self.orders.items()
+            if order_id in open_order_ids and order.status in {"open", "partial"}
+        }
 
     def _next_order_id(self) -> str:
         return f"paper-{int(time.time() * 1000)}-{len(self.orders) + 1}"

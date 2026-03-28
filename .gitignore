@@ -9,3 +9,4 @@ htmlcov/
 logs/
 *.log
 /data/collection_*.csv
+/data/runtime/
