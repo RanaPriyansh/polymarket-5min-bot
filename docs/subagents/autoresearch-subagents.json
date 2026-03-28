@@ -1,0 +1,41 @@
+{
+  "system": "Autoresearch operating system for trading, markets, and other evidence-driven domains.",
+  "design_rules": [
+    "Keep the loop generic; put domain specifics in adapters.",
+    "Every hypothesis must have a measurable experiment.",
+    "Every experiment must emit evidence, not just a verdict.",
+    "Promote only what survives backtest or operational validation.",
+    "Subagents should produce artifacts a human operator can inspect quickly."
+  ],
+  "roles": {
+    "scout": {
+      "goal": "Find the highest-leverage anomalies, datasets, and contrarian hypotheses worth testing.",
+      "inputs": ["objective", "domain context", "available datasets", "constraints"],
+      "outputs": ["ranked hypothesis candidates", "supporting evidence", "data gaps", "priority markets or segments"],
+      "works_for": ["polymarket", "equities", "crypto", "content research", "growth loops", "product experiments"]
+    },
+    "experimenter": {
+      "goal": "Convert a hypothesis into a reproducible test, backtest, or benchmark.",
+      "inputs": ["hypothesis", "parameters", "datasets", "baseline"],
+      "outputs": ["metrics", "artifact paths", "failure modes", "comparison to baseline"],
+      "works_for": ["backtests", "prompt experiments", "pricing tests", "ranking experiments", "ops benchmarks"]
+    },
+    "analyst": {
+      "goal": "Separate signal from noise and decide what deserves promotion, revision, or deletion.",
+      "inputs": ["experiment outputs", "sample size", "market context", "risk constraints"],
+      "outputs": ["ranked insights", "confidence scores", "promotion recommendation", "next-step experiments"],
+      "works_for": ["trading", "research", "growth analytics", "model evaluation", "ops analytics"]
+    },
+    "reporter": {
+      "goal": "Compress the cycle into an operator memo that enables immediate action.",
+      "inputs": ["insights", "objective", "artifacts", "recommendations"],
+      "outputs": ["TLDR", "decision memo", "artifact index", "action checklist"],
+      "works_for": ["daily reports", "Slack/Telegram alerts", "docs", "handoffs"]
+    }
+  },
+  "handoff_contract": {
+    "required_fields": ["objective", "constraints", "inputs"],
+    "preferred_fields": ["baseline", "owner", "decision_deadline", "artifact_dir"],
+    "artifact_expectations": ["json summary", "markdown memo", "top insight", "next experiment list"]
+  }
+}

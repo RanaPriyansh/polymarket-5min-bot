@@ -72,10 +72,24 @@ The repo includes a small synthetic dataset so you can validate the offline path
 source .venv/bin/activate
 python cli.py --help
 python cli.py backtest --data data/sample_backtest.csv
+python cli.py research --data data/sample_backtest.csv --max-hypotheses 2 --max-markets 2
 python -m unittest discover -s tests -v
 ```
 
 Start here before attempting any paper or live workflow.
+
+### Canonical merge status
+
+This repo is the canonical Polymarket runtime base.
+
+Selective imports already landed from the wider project portfolio:
+- market filtering/ranking concepts from `polymarket-bot-swarm`
+- generic autoresearch loop shape inspired by Karpathy-style `autoresearch.py`
+- Polymarket-specific research adapters and reusable subagent role templates
+
+See:
+- `docs/plans/2026-03-28-canonical-merge.md`
+- `docs/subagents/autoresearch-subagents.json`
 
 ### 4. Collect historical data (optional)
 

@@ -13,6 +13,8 @@ from pathlib import Path
 import click
 import yaml
 
+from market_filter import filter_ranked_markets, summarize_filter_results
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(name)s %(levelname)s: %(message)s'
@@ -64,6 +66,19 @@ def seconds_to_resolution(market: dict):
     if end_ts is None:
         return None
     return end_ts - time.time()
+
+
+def select_markets_for_trading(markets, cfg):
+    market_filter_cfg = cfg.get("market_filter", {})
+    if not market_filter_cfg.get("enabled", True):
+        return markets, {
+            "passed": len(markets),
+            "filtered": 0,
+            "top_passed": [],
+            "top_filtered": [],
+        }
+    selected, _, ranked = filter_ranked_markets(markets, market_filter_cfg)
+    return selected, summarize_filter_results(ranked)
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -120,9 +135,18 @@ def run(mode, strategies):
                     markets_5m = await md.get_markets_by_duration(minutes=5)
                     markets_15m = await md.get_markets_by_duration(minutes=15)
                     all_markets = merge_unique_markets(markets_5m, markets_15m)
-                    click.echo(f"[{datetime.utcnow()}] Fetched {len(all_markets)} markets (5m+15m)")
+                    selected_markets, filter_summary = select_markets_for_trading(all_markets, cfg)
+                    click.echo(
+                        f"[{datetime.utcnow()}] Fetched {len(all_markets)} markets (5m+15m) | "
+                        f"selected {len(selected_markets)} | filtered {filter_summary['filtered']}"
+                    )
+                    if filter_summary["top_passed"]:
+                        best = filter_summary["top_passed"][0]
+                        click.echo(
+                            f"Top market: {best['market_id']} score={best['score']} reason={best['reason']}"
+                        )
 
-                    for market in all_markets:
+                    for market in selected_markets:
                         market_id = market["id"]
                         market_order_submitted = False
                         resolver_info = resolver_map.upsert_market(market)
@@ -399,7 +423,14 @@ def collect():
                         await md.get_markets_by_duration(minutes=5),
                         await md.get_markets_by_duration(minutes=15),
                     )
-                    for m in markets:
+                    selected_markets, filter_summary = select_markets_for_trading(markets, cfg)
+                    click.echo(
+                        f"[{datetime.utcnow()}] Found {len(markets)} active markets | "
+                        f"collecting {len(selected_markets)} after filters"
+                    )
+                    if filter_summary["top_filtered"]:
+                        click.echo(f"Filtered example: {filter_summary['top_filtered'][0]['reason']}")
+                    for m in selected_markets:
                         mid = m["id"]
                         ob = await md.get_orderbook(mid, "YES")
                         rec = {
@@ -424,6 +455,38 @@ def collect():
                 click.echo(f"Saved {len(df)} records to {fname}")
 
     asyncio.run(collect_loop())
+
+
+@cli.command(name='research')
+@click.option(
+    '--data',
+    default=str(REPO_ROOT / 'data' / 'sample_backtest.csv'),
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help='Path to historical order book CSV used for autoresearch.',
+)
+@click.option('--objective', default='find the best starting configuration for 5/15-minute paper trading', help='Research objective.')
+@click.option('--max-hypotheses', default=3, type=int, help='Maximum hypotheses to test in one cycle.')
+@click.option('--max-markets', default=5, type=int, help='How many markets from the dataset to evaluate.')
+@click.option('--output-dir', default=str(REPO_ROOT / 'data' / 'research'), type=click.Path(path_type=Path), help='Directory for research artifacts.')
+def run_research(data, objective, max_hypotheses, max_markets, output_dir):
+    """Run the generic autoresearch loop on Polymarket data."""
+    from research import run_polymarket_research_cycle
+
+    result = run_polymarket_research_cycle(
+        config_path=CONFIG_PATH,
+        data_path=data,
+        output_dir=output_dir,
+        objective=objective,
+        max_hypotheses=max_hypotheses,
+        max_markets=max_markets,
+    )
+    click.echo(f"Research cycle: {result['cycle_id']}")
+    click.echo(f"Report: {result['report'].get('path')}")
+    click.echo(f"Artifacts: {result['report'].get('artifact_path')}")
+    click.echo(f"Subagents: {result['report'].get('subagents_path')}")
+    if result['top_insight']:
+        click.echo(f"Top insight: {result['top_insight']['insight']}")
+        click.echo(f"Action: {result['top_insight']['action']}")
 
 
 if __name__ == '__main__':

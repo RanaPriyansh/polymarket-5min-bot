@@ -58,6 +58,18 @@ strategies:
     min_imbalance: 0.2
     reference_capital: 1000
     kelly_fraction: 0.10
+market_filter:
+  enabled: true
+  scan_limit: 25
+  min_volume_usd: 5000
+  min_days_to_resolution: 0.0
+  max_days_to_resolution: 90.0
+  extreme_low: 0.05
+  extreme_high: 0.95
+research:
+  output_dir: data/research
+  max_hypotheses: 3
+  max_markets: 5
 telegram:
   bot_token: YOUR_BOT_TOKEN
   chat_id: YOUR_CHAT_ID
