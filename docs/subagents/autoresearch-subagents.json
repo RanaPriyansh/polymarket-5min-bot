@@ -1,0 +1,22 @@
+{
+  "scout": {
+    "goal": "Inspect live runtime artifacts and surface anomalies in fill rates, toxic-book skip reasons, and realized pnl by family.",
+    "inputs": ["data/runtime/status.json", "data/runtime/strategy_metrics.json", "data/runtime/market_samples.jsonl"],
+    "outputs": ["ranked anomaly list", "candidate hypotheses"]
+  },
+  "experimenter": {
+    "goal": "Turn runtime anomalies into parameter sweeps and replay experiments.",
+    "inputs": ["runtime anomaly list", "sample backtest data"],
+    "outputs": ["experiment plan", "parameter deltas"]
+  },
+  "analyst": {
+    "goal": "Compare live runtime artifacts vs historical backtest expectations.",
+    "inputs": ["runtime research artifacts", "backtest summaries"],
+    "outputs": ["confidence-ranked conclusions", "promotion/kill recommendations"]
+  },
+  "reporter": {
+    "goal": "Write operator-facing markdown and JSON summaries with next actions.",
+    "inputs": ["research cycle result"],
+    "outputs": ["markdown report", "json artifact"]
+  }
+}
