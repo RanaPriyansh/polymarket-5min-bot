@@ -27,12 +27,14 @@ class MMQuote:
 class ToxicityMM:
     def __init__(self, config: dict):
         params = config["strategies"]["toxicity_mm"]
+        execution_cfg = config.get("execution", {})
         filters = config.get("filters", {})
         self.vpin_threshold = params["vpin_threshold"]
         self.spread_multiplier = params["spread_multiplier"]
         self.kelly_fraction = params["kelly_fraction"]
         self.timeframes = params["timeframes"]
         self.max_position = params["max_position"]
+        self.paper_max_notional_usd = float(execution_cfg.get("mm_paper_max_notional_usd", 5.0))
         self.base_spread_bps = 5
         self.position_risk_limit = 0.1
         self.max_book_spread_bps = filters.get("max_book_spread_bps", 250)
@@ -43,8 +45,8 @@ class ToxicityMM:
         self.recent_trades = []
 
     def calculate_vpin(self, orderbook: OrderBook, timeframe_seconds: int = 60) -> float:
-        yes_imb = PolymarketData.calculate_imbalance(orderbook, "YES")
-        no_imb = PolymarketData.calculate_imbalance(orderbook, "NO")
+        yes_imb = PolymarketData.calculate_imbalance(orderbook, orderbook.outcome_labels[0])
+        no_imb = PolymarketData.calculate_imbalance(orderbook, orderbook.outcome_labels[1])
         return (abs(yes_imb) + abs(no_imb)) / 2
 
     def assess_book(self, orderbook: OrderBook, outcome: str = "YES") -> BookQuality:
@@ -64,7 +66,8 @@ class ToxicityMM:
         return base * multiplier * spread_penalty * (1 + volatility_estimate * 10)
 
     def generate_quotes(self, market_id: str, orderbook: OrderBook) -> Tuple[Optional[MMQuote], Optional[MMQuote], BookQuality]:
-        quality = self.assess_book(orderbook, "YES")
+        primary_outcome = orderbook.outcome_labels[0]
+        quality = self.assess_book(orderbook, primary_outcome)
         if not quality.is_tradeable:
             return None, None, quality
 
@@ -74,8 +77,8 @@ class ToxicityMM:
             quality.is_tradeable = False
             return None, None, quality
 
-        mid_yes = PolymarketData.mid_price(orderbook, "YES")
-        mid_no = PolymarketData.mid_price(orderbook, "NO")
+        mid_yes = PolymarketData.mid_price(orderbook, primary_outcome)
+        mid_no = PolymarketData.mid_price(orderbook, orderbook.outcome_labels[1])
         if mid_yes == 0 or mid_no == 0:
             quality.reasons.append("missing_mid")
             quality.is_tradeable = False
@@ -91,11 +94,11 @@ class ToxicityMM:
             return None, None, quality
 
         size = (self.kelly_fraction * 1000) / spread_price_units
-        size = min(size, self.max_position)
+        size = min(size, self.max_position, self.paper_max_notional_usd / max(mid_yes, 1e-9))
         size = max(size, 1.0)
         quote = MMQuote(
             market_id=market_id,
-            outcome="YES",
+            outcome=primary_outcome,
             bid_price=round(bid_price, 4),
             ask_price=round(ask_price, 4),
             bid_size=round(size, 2),
@@ -107,8 +110,8 @@ class ToxicityMM:
 
     def update_position(self, market_id: str, outcome: str, executed_price: float, size: float, is_buy: bool):
         if market_id not in self.positions:
-            self.positions[market_id] = {"YES": {"size": 0, "avg": 0}, "NO": {"size": 0, "avg": 0}}
-        pos = self.positions[market_id][outcome]
+            self.positions[market_id] = {}
+        pos = self.positions[market_id].setdefault(outcome, {"size": 0, "avg": 0})
         if is_buy:
             total_cost = pos["size"] * pos["avg"] + size * executed_price
             pos["size"] += size

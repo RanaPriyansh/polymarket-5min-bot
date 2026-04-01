@@ -7,21 +7,24 @@ Commands: run, backtest, paper, live, collect, research
 from __future__ import annotations
 
 import asyncio
-import click
-import yaml
 import logging
 import time
-from datetime import datetime
 from pathlib import Path
+from typing import Dict, Iterable, List
 
-from runtime_telemetry import RuntimeTelemetry
+import click
+import yaml
+
 from research.loop import ResearchLoop
 from research.polymarket import PolymarketRuntimeResearchAdapter
+from runtime_telemetry import RuntimeTelemetry
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s: %(message)s",
 )
+
+logger = logging.getLogger(__name__)
 
 
 @click.group()
@@ -30,9 +33,79 @@ def cli():
     pass
 
 
+def _load_dotenv() -> None:
+    try:
+        from dotenv import load_dotenv  # type: ignore
+    except ImportError:
+        return
+    load_dotenv()
+
+
+def _ensure_runtime_dirs(cfg: dict) -> None:
+    Path("data").mkdir(exist_ok=True)
+    Path("logs").mkdir(exist_ok=True)
+    runtime_dir = Path(cfg.get("runtime", {}).get("dir", "data/runtime"))
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    log_file = Path(cfg.get("logging", {}).get("file", "logs/bot.log"))
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _apply_env_overrides(cfg: dict) -> dict:
+    import os
+
+    env_mapping = {
+        ("polymarket", "wallet_address"): "POLYMARKET_WALLET_ADDRESS",
+        ("polymarket", "private_key"): "POLYMARKET_PRIVATE_KEY",
+        ("telegram", "bot_token"): "TELEGRAM_BOT_TOKEN",
+        ("telegram", "chat_id"): "TELEGRAM_CHAT_ID",
+    }
+    for path, env_name in env_mapping.items():
+        value = os.getenv(env_name)
+        if value:
+            cursor = cfg
+            for key in path[:-1]:
+                cursor = cursor.setdefault(key, {})
+            cursor[path[-1]] = value
+    return cfg
+
+
 def load_cfg() -> dict:
+    _load_dotenv()
     with open("config.yaml", "r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
+        cfg = yaml.safe_load(fh)
+    cfg = _apply_env_overrides(cfg)
+    _ensure_runtime_dirs(cfg)
+    return cfg
+
+
+def _emit_events(runtime: RuntimeTelemetry, events: Iterable[Dict]) -> None:
+    for event in events:
+        payload = dict(event)
+        event_type = payload.pop("event_type", "runtime.event")
+        runtime.append_event(event_type, payload)
+
+
+def _active_slot_summary(markets: List[Dict]) -> List[Dict]:
+    return [
+        {
+            "slot_id": market["slot_id"],
+            "market_id": market["id"],
+            "market_slug": market["slug"],
+            "asset": market.get("asset"),
+            "interval_minutes": market.get("interval_minutes"),
+            "end_ts": market["end_ts"],
+        }
+        for market in markets
+    ]
+
+
+def _enforce_clock_drift(drift_seconds: float) -> None:
+    if drift_seconds > 5:
+        logger.warning("Clock drift is %.2fs vs Polymarket API time", drift_seconds)
+    if drift_seconds > 30:
+        logger.warning("Clock drift exceeds 30s; paper trading may query stale windows")
+    if drift_seconds > 60:
+        raise click.ClickException(f"Clock drift too large for interval markets: {drift_seconds:.2f}s")
 
 
 @cli.command()
@@ -40,20 +113,24 @@ def load_cfg() -> dict:
 @click.option("--strategies", default="mean_reversion_5min,toxicity_mm", help="Comma-separated active strategies")
 @click.option("--max-loops", type=int, default=0, help="Bounded loop count for smoke tests")
 @click.option("--runtime-dir", default="data/runtime", help="Directory for durable runtime telemetry")
-@click.option("--sleep-seconds", type=int, default=60, help="Loop sleep duration")
+@click.option("--sleep-seconds", type=int, default=15, help="Loop sleep duration")
 def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     """Run the trading bot in specified mode."""
     from book_quality import assess_book_quality
+    from execution import PolymarketExecutor
     from market_data import PolymarketData
+    from risk import RiskManager
     from strategies.mean_reversion_5min import MeanReversion5Min
     from strategies.toxicity_mm import ToxicityMM
-    from execution import PolymarketExecutor
-    from risk import RiskManager
+
+    if mode == "live":
+        raise click.ClickException("Live mode is deferred until the restored paper workflow is proven.")
 
     cfg = load_cfg()
     active_strategies = [item.strip() for item in strategies.split(",") if item.strip()]
     cfg["strategies"]["active"] = active_strategies
     filters = cfg.get("filters", {})
+    initial_capital = float(cfg.get("execution", {}).get("paper_starting_bankroll", 500.0))
 
     click.echo(f"Starting bot in {mode} mode with strategies: {','.join(active_strategies)}")
     click.echo("Press Ctrl+C to stop.")
@@ -65,32 +142,48 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
         runtime.update_status(run_id=run_id, phase="starting", mode=mode, strategies=active_strategies, loop_count=0)
 
         async with PolymarketData(cfg) as md:
+            startup = await md.smoke_check()
+            _enforce_clock_drift(startup["clock_drift_seconds"])
+            runtime.append_event("runtime.startup_check", startup)
+
             mean_rev = MeanReversion5Min(cfg)
             mm = ToxicityMM(cfg)
-            risk_mgr = RiskManager(cfg, initial_capital=1000.0)
-            executor = None
+            risk_mgr = RiskManager(cfg, initial_capital=initial_capital)
+            executor = PolymarketExecutor(cfg, md, mode=mode)
+            await executor.__aenter__()
             last_realized_total = 0.0
-
-            if mode in ("paper", "live"):
-                executor = PolymarketExecutor(cfg, md, mode=mode)
-                await executor.__aenter__()
-
             loop_count = 0
+
             try:
                 while True:
                     loop_count += 1
-                    all_markets = await md.get_markets_by_duration(minutes=15)
-                    click.echo(f"[{datetime.utcnow()}] Fetched {len(all_markets)} markets (within 15m)")
-                    market_ids = [market["id"] for market in all_markets]
-                    order_book_tasks = [md.get_orderbook(market_id, "YES") for market_id in market_ids]
-                    order_books = await asyncio.gather(*order_book_tasks, return_exceptions=True)
+                    loop_now = time.time()
+                    all_markets = await md.get_markets_by_duration(minutes=max(md.intervals))
+                    click.echo(f"Discovered {len(all_markets)} strict interval markets")
+
+                    for market in all_markets:
+                        executor.register_market(market)
+                        runtime.append_event("market.discovered", {
+                            "slot_id": market["slot_id"],
+                            "market_id": market["id"],
+                            "market_slug": market["slug"],
+                            "asset": market.get("asset"),
+                            "interval_minutes": market.get("interval_minutes"),
+                            "end_ts": market["end_ts"],
+                        })
+
+                    order_books = await asyncio.gather(
+                        *[md.get_orderbook(market) for market in all_markets],
+                        return_exceptions=True,
+                    )
 
                     processed_markets = 0
                     toxic_skips = 0
-                    fill_events = []
+                    fill_events: List[Dict] = []
 
                     for idx, market in enumerate(all_markets):
                         market_id = market["id"]
+                        primary_outcome = market["outcomes"][0]
                         ob_or_exc = order_books[idx]
                         if isinstance(ob_or_exc, Exception):
                             click.echo(f"Error fetching order book for {market_id}: {ob_or_exc}")
@@ -100,7 +193,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         orderbook = ob_or_exc
                         book_quality = assess_book_quality(
                             orderbook,
-                            "YES",
+                            primary_outcome,
                             max_spread_bps=filters.get("max_book_spread_bps", 250),
                             min_top_depth=filters.get("min_top_depth", 25),
                             min_top_notional=filters.get("min_top_notional", 10),
@@ -109,6 +202,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         runtime.append_market_sample({
                             "run_id": run_id,
                             "market_id": market_id,
+                            "market_slug": market["slug"],
+                            "slot_id": market["slot_id"],
                             "volume": float(market.get("volume", 0)),
                             "book_spread_bps": round(book_quality.spread_bps, 3),
                             "book_depth": round(book_quality.top_depth, 3),
@@ -117,26 +212,24 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                             "is_tradeable": book_quality.is_tradeable,
                         })
 
-                        if executor:
-                            fill_events.extend(executor.evaluate_market_orders(market_id, orderbook))
+                        fill_events.extend(executor.evaluate_market_orders(market_id, orderbook))
+                        mid = md.mid_price(orderbook, primary_outcome)
+                        mean_rev.update_price(market_id, mid, loop_now, float(market.get("volume", 0)))
 
-                        mid = md.mid_price(orderbook, "YES")
-                        mean_rev.update_price(market_id, mid, time.time(), float(market.get("volume", 0)))
-
-                        if "mean_reversion_5min" in active_strategies and executor:
+                        if "mean_reversion_5min" in active_strategies:
                             executor.note_market_seen("mean_reversion_5min")
-                        if "toxicity_mm" in active_strategies and executor:
+                        if "toxicity_mm" in active_strategies:
                             executor.note_market_seen("toxicity_mm")
 
                         if not book_quality.is_tradeable:
                             toxic_skips += 1
-                            if executor:
-                                if "mean_reversion_5min" in active_strategies:
-                                    executor.note_toxic_book_skip("mean_reversion_5min")
-                                if "toxicity_mm" in active_strategies:
-                                    executor.note_toxic_book_skip("toxicity_mm")
+                            if "mean_reversion_5min" in active_strategies:
+                                executor.note_toxic_book_skip("mean_reversion_5min")
+                            if "toxicity_mm" in active_strategies:
+                                executor.note_toxic_book_skip("toxicity_mm")
                             runtime.append_event("market.skipped_toxic_book", {
                                 "market_id": market_id,
+                                "market_slug": market["slug"],
                                 "reasons": list(book_quality.reasons),
                                 "spread_bps": book_quality.spread_bps,
                                 "top_depth": book_quality.top_depth,
@@ -147,45 +240,28 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         volume = float(market.get("volume", 0))
 
                         if "mean_reversion_5min" in active_strategies:
-                            signal = mean_rev.generate_signal(market_id, "YES", mid, orderbook, volume)
+                            signal = mean_rev.generate_signal(market_id, primary_outcome, mid, orderbook, volume)
                             if signal:
-                                click.echo(
-                                    f"SIGNAL: {market_id} {signal.outcome} {signal.action} {signal.size}@{signal.price} ({signal.reason})"
-                                )
-                                if executor:
-                                    order_id = await executor.place_order(
-                                        market_id,
-                                        signal.outcome,
-                                        signal.action,
-                                        signal.size,
-                                        signal.price,
-                                        strategy_family="mean_reversion_5min",
-                                        order_kind="signal",
+                                signal.size = risk_mgr.cap_requested_size(max(mid, 0.01), signal.size)
+                                if signal.size > 0:
+                                    click.echo(
+                                        f"SIGNAL: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{mid:.4f} ({signal.reason})"
                                     )
-                                    runtime.append_event("order.submitted", {
-                                        "market_id": market_id,
-                                        "order_id": order_id,
-                                        "strategy_family": "mean_reversion_5min",
-                                        "side": signal.action,
-                                        "price": signal.price,
-                                        "size": signal.size,
-                                        "reason": signal.reason,
-                                    })
+                                    result = await executor.execute_signal_trade(market, orderbook, signal)
+                                    _emit_events(runtime, result.get("events", []))
 
-                        if "toxicity_mm" in active_strategies and executor:
-                            quote_yes, quote_no, quality = mm.generate_quotes(market_id, orderbook)
+                        if "toxicity_mm" in active_strategies:
+                            quote_yes, _, quality = mm.generate_quotes(market_id, orderbook)
                             if not quote_yes:
                                 executor.note_toxic_book_skip("toxicity_mm")
                                 runtime.append_event("quote.skipped", {
                                     "market_id": market_id,
+                                    "market_slug": market["slug"],
                                     "strategy_family": "toxicity_mm",
                                     "reasons": list(quality.reasons),
                                 })
                             else:
                                 await executor.cancel_family_market(market_id, "toxicity_mm")
-                                click.echo(
-                                    f"MM QUOTE: {quote_yes.outcome} bid {quote_yes.bid_price} ask {quote_yes.ask_price} size {quote_yes.bid_size}"
-                                )
                                 bid_id = await executor.place_order(
                                     market_id,
                                     quote_yes.outcome,
@@ -194,6 +270,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     quote_yes.bid_price,
                                     strategy_family="toxicity_mm",
                                     order_kind="quote",
+                                    market=market,
                                 )
                                 ask_id = await executor.place_order(
                                     market_id,
@@ -203,9 +280,11 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     quote_yes.ask_price,
                                     strategy_family="toxicity_mm",
                                     order_kind="quote",
+                                    market=market,
                                 )
                                 runtime.append_event("quote.submitted", {
                                     "market_id": market_id,
+                                    "market_slug": market["slug"],
                                     "strategy_family": "toxicity_mm",
                                     "bid_order_id": bid_id,
                                     "ask_order_id": ask_id,
@@ -213,23 +292,24 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     "book_quality": quote_yes.book_quality,
                                 })
 
-                    if executor:
-                        for fill in fill_events:
-                            runtime.append_event("order.filled", fill)
-                        realized_total = executor.get_realized_pnl_total()
-                        realized_delta = realized_total - last_realized_total
-                        if realized_delta:
-                            risk_mgr.update_capital(realized_delta)
-                        last_realized_total = realized_total
-                        positions = await executor.refresh_positions()
-                        strategy_metrics = executor.get_family_metrics()
-                    else:
-                        positions = {}
-                        strategy_metrics = {}
+                    _emit_events(runtime, [{**fill, "event_type": "order.filled"} for fill in fill_events])
+                    settlement_events = await executor.process_pending_resolutions(now_ts=time.time())
+                    _emit_events(runtime, settlement_events)
 
+                    realized_total = executor.get_realized_pnl_total()
+                    realized_delta = realized_total - last_realized_total
+                    if realized_delta:
+                        risk_mgr.update_capital(realized_delta)
+                    last_realized_total = realized_total
+
+                    positions = await executor.refresh_positions()
+                    strategy_metrics = executor.get_family_metrics()
                     runtime.write_strategy_metrics(strategy_metrics)
+
+                    executor_snapshot = executor.get_runtime_snapshot(now_ts=time.time())
                     risk_report = risk_mgr.get_risk_report()
-                    runtime.update_status(
+                    risk_report["positions"] = executor_snapshot["open_position_count"]
+                    runtime.write_runtime_snapshot(
                         run_id=run_id,
                         phase="running",
                         mode=mode,
@@ -237,12 +317,24 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         fetched_markets=len(all_markets),
                         processed_markets=processed_markets,
                         toxic_skips=toxic_skips,
-                        risk=risk_report,
+                        bankroll=round(risk_report["capital"], 6),
+                        open_position_count=executor_snapshot["open_position_count"],
+                        resolved_trade_count=executor_snapshot["resolved_trade_count"],
+                        win_rate=round(executor_snapshot["win_rate"], 6),
+                        active_slots=_active_slot_summary(all_markets),
+                        pending_resolution_slots=executor_snapshot["pending_resolution_slots"],
+                        latest_settlement=executor_snapshot["latest_settlement"],
                         positions=positions,
                         strategy_metrics=strategy_metrics,
+                        risk=risk_report,
                     )
                     click.echo(
-                        f"Risk: Capital ${risk_report['capital']:.2f}, DD {risk_report['max_drawdown']:.2%}, toxic_skips={toxic_skips}"
+                        "Paper bankroll ${capital:.2f} | open={open} | resolved={resolved} | pending={pending}".format(
+                            capital=risk_report["capital"],
+                            open=executor_snapshot["open_position_count"],
+                            resolved=executor_snapshot["resolved_trade_count"],
+                            pending=len(executor_snapshot["pending_resolution_slots"]),
+                        )
                     )
 
                     if risk_mgr.check_circuit_breakers():
@@ -261,8 +353,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
             finally:
                 runtime.update_status(run_id=run_id, phase="stopped", mode=mode, loop_count=loop_count)
                 runtime.append_event("runtime.stopped", {"run_id": run_id, "loop_count": loop_count})
-                if executor:
-                    await executor.__aexit__(None, None, None)
+                await executor.__aexit__(None, None, None)
 
     asyncio.run(main_loop())
 
@@ -274,7 +365,7 @@ def backtest(data):
     from backtest_engine import Backtester
 
     cfg = load_cfg()
-    bt = Backtester(cfg, initial_capital=1000.0)
+    bt = Backtester(cfg, initial_capital=float(cfg.get("execution", {}).get("paper_starting_bankroll", 500.0)))
     click.echo(f"Loading data from {data}")
     df = bt.load_historical_orderbooks(data)
     if df.empty:
@@ -284,10 +375,10 @@ def backtest(data):
     market_ids = df["market_id"].unique()[:5]
     results = []
     for mid in market_ids:
-        result = bt.simulate_mean_reversion(df, mid, outcome="YES")
+        result = bt.simulate_mean_reversion(df, mid)
         if result.total_trades > 0:
             results.append(result)
-            click.echo(f"{mid}-YES: {result.total_trades} trades, WR {result.win_rate:.1%}, PnL ${result.total_pnl:.2f}")
+            click.echo(f"{mid}: {result.total_trades} trades, WR {result.win_rate:.1%}, PnL ${result.total_pnl:.2f}")
 
     if results:
         total_pnl = sum(r.total_pnl for r in results)
@@ -308,7 +399,7 @@ def paper():
 
 @cli.command()
 def live():
-    """Run live trading (requires wallet configured)."""
+    """Run live trading (currently disabled pending paper validation)."""
     ctx = click.get_current_context()
     ctx.invoke(run, mode="live")
 
@@ -318,7 +409,6 @@ def collect():
     """Collect real-time order book data for later backtesting."""
     import pandas as pd
 
-    from book_quality import assess_book_quality
     from market_data import PolymarketData
 
     cfg = load_cfg()
@@ -329,41 +419,34 @@ def collect():
             records = []
             try:
                 while True:
-                    markets = await md.get_markets_by_duration(minutes=15)
-                    for market in markets:
-                        market_id = market["id"]
-                        orderbook = await md.get_orderbook(market_id, "YES")
-                        quality = assess_book_quality(
-                            orderbook,
-                            "YES",
-                            max_spread_bps=cfg.get("filters", {}).get("max_book_spread_bps", 250),
-                            min_top_depth=cfg.get("filters", {}).get("min_top_depth", 25),
-                            min_top_notional=cfg.get("filters", {}).get("min_top_notional", 10),
-                            max_depth_ratio=cfg.get("filters", {}).get("max_depth_ratio", 12),
-                        )
-                        records.append({
-                            "timestamp": datetime.utcnow(),
-                            "market_id": market_id,
-                            "outcome": "YES",
-                            "best_bid": orderbook.yes_bids[0][0] if orderbook.yes_bids else 0,
-                            "best_ask": orderbook.yes_asks[0][0] if orderbook.yes_asks else 0,
-                            "bid_size": orderbook.yes_bids[0][1] if orderbook.yes_bids else 0,
-                            "ask_size": orderbook.yes_asks[0][1] if orderbook.yes_asks else 0,
-                            "mid_price": md.mid_price(orderbook, "YES"),
-                            "volume": float(market.get("volume", 0)),
-                            "book_spread_bps": quality.spread_bps,
-                            "book_depth": quality.top_depth,
-                            "book_notional": quality.top_notional,
-                            "book_reasons": "|".join(quality.reasons),
-                        })
-                    click.echo(f"[{datetime.utcnow()}] Collected {len(records)} snapshots")
+                    markets = await md.get_markets_by_duration(minutes=max(md.intervals))
+                    orderbooks = await asyncio.gather(*[md.get_orderbook(market) for market in markets], return_exceptions=True)
+                    for market, orderbook in zip(markets, orderbooks):
+                        if isinstance(orderbook, Exception):
+                            continue
+                        for outcome in market["outcomes"]:
+                            records.append({
+                                "timestamp": time.time(),
+                                "market_id": market["id"],
+                                "market_slug": market["slug"],
+                                "slot_id": market["slot_id"],
+                                "asset": market.get("asset"),
+                                "interval_minutes": market.get("interval_minutes"),
+                                "outcome": outcome,
+                                "best_bid": md.best_bid(orderbook, outcome),
+                                "best_ask": md.best_ask(orderbook, outcome),
+                                "mid_price": md.mid_price(orderbook, outcome),
+                                "imbalance": md.calculate_imbalance(orderbook, outcome),
+                                "volume": float(market.get("volume", 0)),
+                            })
+                    click.echo(f"Collected {len(records)} snapshots")
                     await asyncio.sleep(30)
             except KeyboardInterrupt:
-                Path("data").mkdir(exist_ok=True)
-                df = pd.DataFrame(records)
-                fname = f"data/collection_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
-                df.to_csv(fname, index=False)
-                click.echo(f"Saved {len(df)} records to {fname}")
+                pass
+            finally:
+                fname = Path("data") / f"collection_{int(time.time())}.csv"
+                pd.DataFrame(records).to_csv(fname, index=False)
+                click.echo(f"Saved {len(records)} records to {fname}")
 
     asyncio.run(collect_loop())
 

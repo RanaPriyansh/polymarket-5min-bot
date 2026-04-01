@@ -27,6 +27,7 @@ class RiskManager:
         self.daily_pnl = 0.0
         self.max_drawdown = 0.0
         self.positions = {}  # market_id -> size and entry
+        self.max_risk_per_trade_usd = float(self.config.get("max_risk_per_trade_usd", 10.0))
 
     def kelly_size(self, edge: float, volatility: float, fraction: float = 0.25) -> float:
         """
@@ -50,6 +51,7 @@ class RiskManager:
         target_dollar = self.current_capital * f
         # But also enforce strategy max position size
         max_dollar = self.current_capital * self.config.get("max_position_size", 0.1)
+        max_dollar = min(max_dollar, self.max_risk_per_trade_usd)
         target_dollar = min(target_dollar, max_dollar)
 
         # Convert price to units: units = dollar / price (for YES/NO, price is probability)
@@ -63,14 +65,23 @@ class RiskManager:
             reason=f"Kelly(f={f:.2%}, edge={edge:.2%})"
         )
 
+    def cap_requested_size(self, price: float, requested_size: float) -> float:
+        """Cap externally generated sizes to paper-trading limits."""
+        if price <= 0 or requested_size <= 0:
+            return 0.0
+        max_position_dollar = self.current_capital * self.config.get("max_position_size", 0.1)
+        capped_dollar = min(max_position_dollar, self.max_risk_per_trade_usd)
+        capped_units = capped_dollar / price
+        return round(min(requested_size, capped_units), 2)
+
     def check_circuit_breakers(self) -> bool:
         """Return True if trading should be halted."""
         # Daily loss limit
-        if abs(self.daily_pnl) / self.initial_capital > self.config.get("max_daily_loss", 0.05):
+        if self.daily_pnl < 0 and abs(self.daily_pnl) / self.initial_capital > self.config.get("max_daily_loss", 0.05):
             logger.warning(f"Daily loss limit hit: {self.daily_pnl:.2f}")
             return True
         # Max drawdown
-        current = self.peak_capital + self.daily_pnl
+        current = self.current_capital
         dd = (self.peak_capital - current) / self.peak_capital if self.peak_capital > 0 else 0
         if dd > self.config.get("circuit_breaker_dd", 0.1):
             logger.warning(f"Drawdown limit hit: {dd:.2%}")

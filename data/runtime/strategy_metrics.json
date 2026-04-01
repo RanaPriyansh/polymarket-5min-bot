@@ -1,0 +1,20 @@
+{
+  "mean_reversion_5min": {
+    "cancellations": 0,
+    "markets_seen": 8,
+    "orders_filled": 0,
+    "orders_resting": 0,
+    "quotes_submitted": 0,
+    "realized_pnl": 0.0,
+    "toxic_book_skips": 8
+  },
+  "toxicity_mm": {
+    "cancellations": 0,
+    "markets_seen": 8,
+    "orders_filled": 0,
+    "orders_resting": 0,
+    "quotes_submitted": 0,
+    "realized_pnl": 0.0,
+    "toxic_book_skips": 8
+  }
+}

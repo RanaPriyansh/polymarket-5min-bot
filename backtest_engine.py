@@ -1,19 +1,21 @@
 """
-Backtesting Engine for 5/15-minute strategies
-Replays historical order book snapshots and simulates trades
+Backtesting engine for strict interval market snapshots.
 """
 
-import pandas as pd
-import numpy as np
-from typing import List, Dict, Tuple
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from market_data import OrderBook
-from strategies.mean_reversion_5min import MeanReversion5Min
-from risk import RiskManager
-import matplotlib.pyplot as plt
+from typing import Dict, List, Optional
 import logging
 
+import numpy as np
+import pandas as pd
+
+from market_data import OrderBook
+from strategies.mean_reversion_5min import MeanReversion5Min
+
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Trade:
@@ -21,12 +23,13 @@ class Trade:
     outcome: str
     entry_time: float
     exit_time: float
-    side: str  # "BUY"/"SELL"
+    side: str
     entry_price: float
     exit_price: float
     size: float
     pnl: float
     reason: str
+
 
 @dataclass
 class BacktestResult:
@@ -38,151 +41,170 @@ class BacktestResult:
     trades: List[Trade] = field(default_factory=list)
     equity_curve: List[float] = field(default_factory=list)
 
+
 class Backtester:
     def __init__(self, config: dict, initial_capital: float = 1000.0):
         self.config = config
-        self.rm = RiskManager(config, initial_capital)
-        self.strategies = {
-            "mean_reversion": MeanReversion5Min(config)
-        }
-        # Results
-        self.trades = []
-        self.equity = [initial_capital]
-        self.current_capital = initial_capital
+        self.initial_capital = initial_capital
+        self.strategy = MeanReversion5Min(config)
 
     def load_historical_orderbooks(self, csv_path: str) -> pd.DataFrame:
-        """Load historical order book snapshots from CSV."""
-        # Expected columns: timestamp, market_id, outcome, best_bid, best_ask, bid_size, ask_size, mid_price, volume
-        df = pd.read_csv(csv_path, parse_dates=['timestamp'])
-        df = df.sort_values('timestamp')
-        return df
+        df = pd.read_csv(csv_path)
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", errors="ignore")
+            if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+        return df.sort_values("timestamp")
 
-    def simulate_mean_reversion(self, df: pd.DataFrame, market_id: str, outcome: str = "YES") -> BacktestResult:
-        """Run mean reversion backtest on a single market."""
-        strat = self.strategies["mean_reversion"]
-        df_market = df[(df['market_id']==market_id) & (df['outcome']==outcome)].copy()
-        if len(df_market) < strat.ema_period + 10:
-            logger.warning(f"Insufficient data for {market_id}-{outcome}")
+    def simulate_mean_reversion(
+        self,
+        df: pd.DataFrame,
+        market_id: str,
+        outcome: Optional[str] = None,
+        resolution_outcomes: Optional[Dict[str, str]] = None,
+    ) -> BacktestResult:
+        df_market = df[df["market_id"] == market_id].copy()
+        if df_market.empty:
             return BacktestResult(0, 0, 0, 0, 0)
 
-        # Simulate
-        position = None  # None, "LONG", "SHORT"
-        entry_price = 0
-        entry_time = None
-        trades = []
+        primary_outcome = outcome or str(df_market["outcome"].iloc[0])
+        df_market = df_market[df_market["outcome"] == primary_outcome].copy()
+        if len(df_market) < self.strategy.ema_period + 2:
+            logger.warning("Insufficient data for %s-%s", market_id, primary_outcome)
+            return BacktestResult(0, 0, 0, 0, 0)
 
-        for idx, row in df_market.iterrows():
-            price = row['mid_price']
-            ts = row['timestamp'].timestamp()
-            volume = row.get('volume', 0)
+        resolved_outcome = None
+        if resolution_outcomes and market_id in resolution_outcomes:
+            resolved_outcome = resolution_outcomes[market_id]
+        elif "resolved_outcome" in df_market.columns:
+            values = [value for value in df_market["resolved_outcome"].dropna().unique() if value]
+            resolved_outcome = values[0] if values else None
 
-            # Update strategy with price
-            strat.update_price(market_id, price, ts, volume)
+        position = None
+        trades: List[Trade] = []
+        capital = self.initial_capital
+        equity_curve = [capital]
 
-            # Build a fake OrderBook object from the row
+        for _, row in df_market.iterrows():
+            ts = row["timestamp"].timestamp() if hasattr(row["timestamp"], "timestamp") else float(row["timestamp"])
+            price = float(row["mid_price"])
+            volume = float(row.get("volume", 0))
+            self.strategy.update_price(market_id, price, ts, volume)
+            ema = self.strategy.calculate_ema(market_id)
+
             ob = OrderBook(
                 market_id=market_id,
-                yes_asks=[(row['best_ask'], row.get('ask_size', 0))],
-                yes_bids=[(row['best_bid'], row.get('bid_size', 0))],
-                no_asks=[], no_bids=[],
+                yes_asks=[(float(row["best_ask"]), float(row.get("ask_size", 0) or 0))],
+                yes_bids=[(float(row["best_bid"]), float(row.get("bid_size", 0) or 0))],
+                no_asks=[(max(0.0, 1 - float(row["best_bid"])), float(row.get("ask_size", 0) or 0))],
+                no_bids=[(max(0.0, 1 - float(row["best_ask"])), float(row.get("bid_size", 0) or 0))],
                 timestamp=ts,
-                sequence=0
+                sequence=int(ts),
+                outcome_labels=(primary_outcome, "Opposite"),
             )
 
-            signal = strat.generate_signal(market_id, outcome, price, ob, volume)
-            if signal and position is None:
-                # Enter position
-                position = signal.action
-                entry_price = signal.price
-                entry_time = ts
-                logger.info(f"ENTRY {ts}: {signal.action} {size}@{signal.price} (conf {signal.confidence:.2f})")
-            elif position and signal is None:
-                # Check exit: mean reversion target hit or timeout
-                # For simplicity: exit after 10 minutes or if price crosses EMA
-                if ts - entry_time > 600:  # 10 minute max hold
-                    exit_price = price
-                    pnl = self._calculate_pnl(position, entry_price, exit_price, signal.size if 'size' in locals() else 0)
+            if position:
+                should_exit = False
+                reason = "timeout"
+                if ema is not None:
+                    if position["side"] == "BUY" and price >= ema:
+                        should_exit = True
+                        reason = "ema_recross"
+                    elif position["side"] == "SELL" and price <= ema:
+                        should_exit = True
+                        reason = "ema_recross"
+                if not should_exit and ts - position["entry_time"] >= 600:
+                    should_exit = True
+                    reason = "timeout"
+                if should_exit:
+                    exit_price = float(row["best_bid"]) if position["side"] == "BUY" else float(row["best_ask"])
+                    pnl = self._calculate_pnl(position["side"], position["entry_price"], exit_price, position["size"])
                     trades.append(Trade(
                         market_id=market_id,
-                        outcome=outcome,
-                        entry_time=entry_time,
+                        outcome=primary_outcome,
+                        entry_time=position["entry_time"],
                         exit_time=ts,
-                        side=position,
-                        entry_price=entry_price,
+                        side=position["side"],
+                        entry_price=position["entry_price"],
                         exit_price=exit_price,
-                        size=signal.size if 'size' in locals() else 0,
+                        size=position["size"],
                         pnl=pnl,
-                        reason="timeout"
+                        reason=reason,
                     ))
+                    capital += pnl
+                    equity_curve.append(capital)
                     position = None
-                    self.current_capital += pnl
-                    self.equity.append(self.current_capital)
 
-        # Close any open position at end
+            if position is None:
+                signal = self.strategy.generate_signal(market_id, primary_outcome, price, ob, volume)
+                if signal:
+                    position = {
+                        "side": signal.action,
+                        "entry_price": float(row["best_ask"]) if signal.action == "BUY" else float(row["best_bid"]),
+                        "entry_time": ts,
+                        "size": signal.size,
+                    }
+
         if position:
-            exit_price = df_market.iloc[-1]['mid_price']
-            pnl = self._calculate_pnl(position, entry_price, exit_price, signal.size if 'size' in locals() else 0)
+            if resolved_outcome:
+                exit_price = 1.0 if resolved_outcome == primary_outcome else 0.0
+                reason = "resolved_outcome"
+            else:
+                exit_price = float(df_market.iloc[-1]["mid_price"])
+                reason = "end_of_data"
+            pnl = self._calculate_pnl(position["side"], position["entry_price"], exit_price, position["size"])
             trades.append(Trade(
                 market_id=market_id,
-                outcome=outcome,
-                entry_time=entry_time,
-                exit_time=df_market.iloc[-1]['timestamp'].timestamp(),
-                side=position,
-                entry_price=entry_price,
+                outcome=primary_outcome,
+                entry_time=position["entry_time"],
+                exit_time=df_market.iloc[-1]["timestamp"].timestamp() if hasattr(df_market.iloc[-1]["timestamp"], "timestamp") else float(df_market.iloc[-1]["timestamp"]),
+                side=position["side"],
+                entry_price=position["entry_price"],
                 exit_price=exit_price,
-                size=signal.size if 'size' in locals() else 0,
+                size=position["size"],
                 pnl=pnl,
-                reason="end_of_data"
+                reason=reason,
             ))
-            self.current_capital += pnl
-            self.equity.append(self.current_capital)
+            capital += pnl
+            equity_curve.append(capital)
 
-        # Compute stats
         if not trades:
             return BacktestResult(0, 0, 0, 0, 0)
 
-        pnls = [t.pnl for t in trades]
-        win_rate = sum(1 for p in pnls if p > 0) / len(pnls)
-        total_pnl = sum(pnls)
-        # Sharpe: assume 0% rf, daily-ish (but intraday) — approximate
+        pnls = [trade.pnl for trade in trades]
         returns = pd.Series(pnls) / self.initial_capital
-        sharpe = returns.mean() / returns.std() * np.sqrt(365*24*60/5) if returns.std() > 0 else 0
-        # Max drawdown
-        equity_curve = pd.Series([self.initial_capital] + [self.initial_capital + sum(pnls[:i+1]) for i in range(len(pnls))])
-        running_max = equity_curve.cummax()
-        dd = (equity_curve - running_max) / running_max
-        max_dd = dd.min()
-
+        sharpe = returns.mean() / returns.std() * np.sqrt(len(returns)) if len(returns) > 1 and returns.std() > 0 else 0.0
+        equity_series = pd.Series(equity_curve)
+        running_max = equity_series.cummax()
+        max_dd = ((equity_series - running_max) / running_max).min()
+        win_rate = sum(1 for pnl in pnls if pnl > 0) / len(pnls)
         return BacktestResult(
             total_trades=len(trades),
             win_rate=win_rate,
-            total_pnl=total_pnl,
+            total_pnl=sum(pnls),
             sharpe=sharpe,
             max_dd=max_dd,
             trades=trades,
-            equity_curve=list(equity_curve)
+            equity_curve=list(equity_curve),
         )
 
-    def _calculate_pnl(self, side: str, entry: float, exit: float, size: float) -> float:
-        """Calculate PnL for a YES/NO trade."""
+    @staticmethod
+    def _calculate_pnl(side: str, entry: float, exit: float, size: float) -> float:
         if side == "BUY":
-            # For YES, buying at entry and selling at exit: (exit - entry) * size
-            # For NO, the price is 1 - probability; we have to think in terms of token value
-            # For MVP we assume we're always trading YES tokens
             return (exit - entry) * size
-        else:  # SELL
-            return (entry - exit) * size
+        return (entry - exit) * size
+
 
 if __name__ == "__main__":
-    import yaml, glob
-    cfg = yaml.safe_load(open("config.yaml"))
-    bt = Backtester(cfg, initial_capital=1000.0)
+    import glob
+    import yaml
 
-    # Find a sample CSV or create dummy
+    cfg = yaml.safe_load(open("config.yaml", encoding="utf-8"))
+    bt = Backtester(cfg, initial_capital=float(cfg.get("execution", {}).get("paper_starting_bankroll", 500.0)))
     csv_files = glob.glob("data/*.csv")
     if csv_files:
         df = bt.load_historical_orderbooks(csv_files[0])
-        result = bt.simulate_mean_reversion(df, market_id="example-market", outcome="YES")
+        result = bt.simulate_mean_reversion(df, market_id=str(df["market_id"].iloc[0]))
         print(f"Backtest: {result.total_trades} trades, WR {result.win_rate:.1%}, PnL ${result.total_pnl:.2f}, Sharpe {result.sharpe:.2f}, MaxDD {result.max_dd:.1%}")
     else:
         print("No data CSVs found in data/ directory. Run collection first.")

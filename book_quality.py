@@ -27,8 +27,13 @@ class BookQuality:
 
 
 def _levels(ob: OrderBook, outcome: str) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
-    if outcome == "YES":
+    normalized = outcome.upper()
+    first_label = ob.outcome_labels[0].upper()
+    second_label = ob.outcome_labels[1].upper()
+    if normalized in {"YES", first_label} or outcome == ob.outcome_labels[0]:
         return ob.yes_bids, ob.yes_asks
+    if normalized in {"NO", second_label} or outcome == ob.outcome_labels[1]:
+        return ob.no_bids, ob.no_asks
     return ob.no_bids, ob.no_asks
 
 

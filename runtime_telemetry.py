@@ -27,7 +27,7 @@ class RuntimeTelemetry:
             "payload": payload,
         }
         with self.events_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(event, sort_keys=True) + "\n")
+            fh.write(json.dumps(event, sort_keys=True, default=str) + "\n")
 
     def append_market_sample(self, payload: Dict) -> None:
         sample = {
@@ -35,17 +35,20 @@ class RuntimeTelemetry:
             **payload,
         }
         with self.market_samples_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(sample, sort_keys=True) + "\n")
+            fh.write(json.dumps(sample, sort_keys=True, default=str) + "\n")
 
     def update_status(self, **fields) -> Dict:
         current = self.read_json(self.status_path) or {}
         current.update(fields)
         current["heartbeat_ts"] = time.time()
-        self.status_path.write_text(json.dumps(current, indent=2, sort_keys=True), encoding="utf-8")
+        self.status_path.write_text(json.dumps(current, indent=2, sort_keys=True, default=str), encoding="utf-8")
         return current
 
     def write_strategy_metrics(self, metrics: Dict) -> None:
-        self.strategy_metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
+        self.strategy_metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True, default=str), encoding="utf-8")
+
+    def write_runtime_snapshot(self, **snapshot) -> Dict:
+        return self.update_status(**snapshot)
 
     def read_json(self, path: Path) -> Optional[Dict]:
         if not path.exists():

@@ -1,67 +1,72 @@
 #!/usr/bin/env python3
 """
-Dedicated collector for 5/15-minute market order books.
-Saves CSV snapshots for backtesting.
+Collector for strict 5m/15m crypto interval markets.
 """
 
+from __future__ import annotations
+
 import asyncio
-import pandas as pd
-from datetime import datetime
-from market_data import PolymarketData
-import yaml
 import sys
+import time
+from pathlib import Path
+
+import click
+import pandas as pd
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from market_data import PolymarketData
+
 
 async def main():
-    cfg = yaml.safe_load(open("../config.yaml"))
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
     records = []
 
     async with PolymarketData(cfg) as md:
         click.echo("Collector started. Ctrl+C to stop and save.")
         while True:
             try:
-                markets_5m = await md.get_markets_by_duration(minutes=5)
-                markets_15m = await md.get_markets_by_duration(minutes=15)
-                all_markets = markets_5m + markets_15m
-                click.echo(f"[{datetime.utcnow()}] Found {len(all_markets)} active markets")
+                markets = await md.get_markets_by_duration(minutes=max(md.intervals))
+                orderbooks = await asyncio.gather(*[md.get_orderbook(market) for market in markets], return_exceptions=True)
+                click.echo(f"Tracking {len(markets)} active interval markets")
 
-                for m in all_markets:
-                    market_id = m["id"]
-                    try:
-                        ob = await md.get_orderbook(market_id, "YES")
-                        rec = {
-                            "timestamp": datetime.utcnow(),
-                            "market_id": market_id,
-                            "outcome": "YES",
-                            "best_bid": ob.yes_bids[0][0] if ob.yes_bids else 0.0,
-                            "best_ask": ob.yes_asks[0][0] if ob.yes_asks else 0.0,
-                            "bid_size": ob.yes_bids[0][1] if ob.yes_bids else 0.0,
-                            "ask_size": ob.yes_asks[0][1] if ob.yes_asks else 0.0,
-                            "mid_price": md.mid_price(ob, "YES"),
-                            "volume": float(m.get("volume", 0)),
-                            "liquidity": float(m.get("liquidity", 0))
-                        }
-                        records.append(rec)
-                    except Exception as e:
-                        click.echo(f"Error on {market_id}: {e}")
+                for market, orderbook in zip(markets, orderbooks):
+                    if isinstance(orderbook, Exception):
+                        click.echo(f"Error on {market['slug']}: {orderbook}")
+                        continue
+                    for outcome in market["outcomes"]:
+                        records.append({
+                            "timestamp": time.time(),
+                            "market_id": market["id"],
+                            "market_slug": market["slug"],
+                            "slot_id": market["slot_id"],
+                            "asset": market.get("asset"),
+                            "interval_minutes": market.get("interval_minutes"),
+                            "outcome": outcome,
+                            "best_bid": md.best_bid(orderbook, outcome),
+                            "best_ask": md.best_ask(orderbook, outcome),
+                            "mid_price": md.mid_price(orderbook, outcome),
+                            "imbalance": md.calculate_imbalance(orderbook, outcome),
+                            "volume": float(market.get("volume", 0)),
+                        })
 
-                # Save snapshot every 30 seconds, sleep between
-                if len(records) % 100 == 0:
-                    temp_df = pd.DataFrame(records)
-                    temp_df.to_csv("data/collection_latest.csv", index=False)
+                if records and len(records) % 50 == 0:
+                    pd.DataFrame(records).to_csv(ROOT / "data" / "collection_latest.csv", index=False)
                 await asyncio.sleep(30)
             except KeyboardInterrupt:
                 break
-            except Exception as e:
-                click.echo(f"Loop error: {e}")
+            except Exception as exc:
+                click.echo(f"Loop error: {exc}")
                 await asyncio.sleep(10)
 
-    # Save all collected data
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    fname = f"data/collection_{timestamp}.csv"
-    df = pd.DataFrame(records)
-    df.to_csv(fname, index=False)
-    click.echo(f"Saved {len(df)} order book snapshots to {fname}")
+    timestamp = int(time.time())
+    fname = ROOT / "data" / f"collection_{timestamp}.csv"
+    pd.DataFrame(records).to_csv(fname, index=False)
+    click.echo(f"Saved {len(records)} order book snapshots to {fname}")
+
 
 if __name__ == "__main__":
-    import click
     asyncio.run(main())

@@ -1,6 +1,5 @@
 """
-Mean Reversion Strategy for 5/15-minute Polymarket YES/NO markets.
-Trades only when both statistical and structural book conditions are sane.
+Mean reversion strategy for binary Polymarket interval markets.
 """
 
 from __future__ import annotations
@@ -90,12 +89,8 @@ class MeanReversion5Min:
         if abs(dev) <= self.dev_threshold:
             return None
 
-        if outcome == "YES":
-            action = "BUY" if dev < 0 else "SELL"
-            confidence = min(abs(dev) / self.dev_threshold, 1.0)
-        else:
-            action = "SELL" if dev < 0 else "BUY"
-            confidence = min(abs(dev) / self.dev_threshold, 1.0)
+        action = "BUY" if dev < 0 else "SELL"
+        confidence = min(abs(dev) / self.dev_threshold, 1.0)
 
         if action == "BUY" and imbalance < self.imbalance_threshold:
             return None
@@ -128,9 +123,9 @@ class MeanReversion5Min:
     def get_markets_to_monitor(self, all_markets: List[Dict]) -> List[Dict]:
         suitable = []
         for market in all_markets:
-            if market.get("status") != "ACTIVE":
+            if not market.get("active", False):
                 continue
-            if "YES" not in [token["outcome"] for token in market.get("tokens", [])]:
+            if len(market.get("tokens", [])) < 2:
                 continue
             if float(market.get("volume", 0)) < self.min_volume:
                 continue
