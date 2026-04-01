@@ -31,6 +31,12 @@ class ResearchAdapter(Protocol):
         ...
 
 
+def make_cycle_id(source: str = "polymarket") -> str:
+    import uuid
+    import time
+    return f"cycle-{source}-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+
+
 class ResearchLoop:
     def __init__(self, artifact_dir: str | Path):
         self.artifact_dir = Path(artifact_dir)
