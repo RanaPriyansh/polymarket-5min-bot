@@ -74,6 +74,10 @@ class Backtester:
             return BacktestResult(0, 0, 0, 0, 0)
 
         resolved_outcome = None
+        interval_minutes = None
+        if "interval_minutes" in df_market.columns:
+            values = [int(value) for value in df_market["interval_minutes"].dropna().unique()]
+            interval_minutes = values[0] if values else None
         if resolution_outcomes and market_id in resolution_outcomes:
             resolved_outcome = resolution_outcomes[market_id]
         elif "resolved_outcome" in df_market.columns:
@@ -89,8 +93,8 @@ class Backtester:
             ts = row["timestamp"].timestamp() if hasattr(row["timestamp"], "timestamp") else float(row["timestamp"])
             price = float(row["mid_price"])
             volume = float(row.get("volume", 0))
-            self.strategy.update_price(market_id, price, ts, volume)
-            ema = self.strategy.calculate_ema(market_id)
+            self.strategy.update_price(market_id, price, ts, volume, interval_minutes=interval_minutes)
+            ema = self.strategy.calculate_ema(market_id, interval_minutes=interval_minutes)
 
             ob = OrderBook(
                 market_id=market_id,
@@ -136,7 +140,14 @@ class Backtester:
                     position = None
 
             if position is None:
-                signal = self.strategy.generate_signal(market_id, primary_outcome, price, ob, volume)
+                signal = self.strategy.generate_signal(
+                    market_id,
+                    primary_outcome,
+                    price,
+                    ob,
+                    volume,
+                    interval_minutes=interval_minutes,
+                )
                 if signal:
                     position = {
                         "side": signal.action,

@@ -5,6 +5,7 @@ import pandas as pd
 from backtest_engine import Backtester
 from execution import PolymarketExecutor
 from market_data import OrderBook, PolymarketData
+from strategies.mean_reversion_5min import MeanReversion5Min
 from strategies.mean_reversion_5min import Signal
 
 
@@ -256,6 +257,41 @@ class RestoreWorkflowTests(unittest.IsolatedAsyncioTestCase):
         result = bt.simulate_mean_reversion(df, "m1", outcome="Up")
         self.assertGreaterEqual(result.total_trades, 1)
         self.assertTrue(all(trade.reason in {"ema_recross", "timeout", "resolved_outcome"} for trade in result.trades))
+
+    def test_mean_reversion_uses_interval_specific_ema(self):
+        cfg = dict(self.config)
+        cfg["strategies"] = dict(self.config["strategies"])
+        cfg["strategies"]["mean_reversion_5min"] = dict(self.config["strategies"]["mean_reversion_5min"])
+        cfg["strategies"]["mean_reversion_5min"]["ema_period"] = 20
+        cfg["strategies"]["mean_reversion_5min"]["ema_period_5m"] = 5
+        cfg["strategies"]["mean_reversion_5min"]["ema_period_15m"] = 20
+        strat = MeanReversion5Min(cfg)
+        for idx in range(5):
+            strat.update_price("m5", 0.50 + (idx * 0.01), idx, 1000, interval_minutes=5)
+        self.assertIsNotNone(strat.calculate_ema("m5", interval_minutes=5))
+        self.assertIsNone(strat.calculate_ema("m5", interval_minutes=15))
+
+    async def test_executor_reports_strategy_market_exposure(self):
+        fake_md = FakeMarketData(self.market)
+        executor = PolymarketExecutor(self.config, fake_md, mode="paper")
+        await executor.__aenter__()
+        try:
+            order_id = await executor.place_order(
+                "m1",
+                "Up",
+                "BUY",
+                5,
+                0.50,
+                post_only=False,
+                strategy_family="toxicity_mm",
+                order_kind="quote",
+                market=self.market,
+            )
+            executor.fill_order(order_id, fill_price=0.50, fill_ts=101.0)
+            self.assertTrue(executor.has_strategy_market_exposure("toxicity_mm", "m1"))
+            self.assertFalse(executor.has_strategy_market_exposure("mean_reversion_5min", "m1"))
+        finally:
+            await executor.__aexit__(None, None, None)
 
 
 if __name__ == "__main__":

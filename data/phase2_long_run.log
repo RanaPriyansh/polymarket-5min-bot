@@ -1,0 +1,181 @@
+Starting bot in paper mode with strategies: mean_reversion_5min,toxicity_mm
+Press Ctrl+C to stop.
+Discovered 8 strict interval markets
+2026-04-01 01:01:25,965 execution INFO: Order accepted: paper-510ae40e0bb2 BUY 9.35@0.5348 Up family=toxicity_mm
+2026-04-01 01:01:25,965 execution INFO: Order accepted: paper-8e4519934645 SELL 9.35@0.5352 Up family=toxicity_mm
+2026-04-01 01:01:25,967 execution INFO: Order accepted: paper-fb3e6a658481 BUY 7.52@0.6647 Up family=toxicity_mm
+2026-04-01 01:01:25,967 execution INFO: Order accepted: paper-5dd6bf858fbd SELL 7.52@0.6653 Up family=toxicity_mm
+2026-04-01 01:01:25,968 execution INFO: Order accepted: paper-9073eea6ce16 BUY 7.52@0.6647 Up family=toxicity_mm
+2026-04-01 01:01:25,968 execution INFO: Order accepted: paper-a5fe15e36c86 SELL 7.52@0.6653 Up family=toxicity_mm
+2026-04-01 01:01:25,970 execution INFO: Order accepted: paper-78ef18f05c7a BUY 10.1@0.4948 Up family=toxicity_mm
+2026-04-01 01:01:25,970 execution INFO: Order accepted: paper-bccbf6898c30 SELL 10.1@0.4952 Up family=toxicity_mm
+2026-04-01 01:01:25,972 execution INFO: Order accepted: paper-1b86a22dbe5e BUY 10.31@0.4848 Up family=toxicity_mm
+2026-04-01 01:01:25,972 execution INFO: Order accepted: paper-87b01f0f63ff SELL 10.31@0.4852 Up family=toxicity_mm
+Paper bankroll $500.00 | open=0 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:01:36,592 execution INFO: Order filled: paper-8e4519934645 family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:01:36,609 execution INFO: Order filled: paper-5dd6bf858fbd family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:01:36,610 execution INFO: Order filled: paper-a5fe15e36c86 family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:01:36,613 execution INFO: Order accepted: paper-400b244a6bba BUY 8.7@0.5747 Up family=toxicity_mm
+2026-04-01 01:01:36,613 execution INFO: Order accepted: paper-48521917d5f5 SELL 8.7@0.5753 Up family=toxicity_mm
+Paper bankroll $500.00 | open=3 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:01:47,844 execution INFO: Order filled: paper-bccbf6898c30 family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:01:47,846 execution INFO: Order filled: paper-48521917d5f5 family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:01:47,849 execution INFO: Order filled: paper-87b01f0f63ff family=toxicity_mm realized_delta=0.0000
+Paper bankroll $500.00 | open=6 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:01:59,019 execution INFO: Order filled: paper-fb3e6a658481 family=toxicity_mm realized_delta=0.6016
+2026-04-01 01:01:59,021 execution INFO: Order accepted: paper-042a48686664 BUY 8.85@0.5647 Up family=toxicity_mm
+2026-04-01 01:01:59,021 execution INFO: Order accepted: paper-4f6270ca025b SELL 8.85@0.5653 Up family=toxicity_mm
+2026-04-01 01:01:59,022 execution INFO: Order filled: paper-400b244a6bba family=toxicity_mm realized_delta=0.4350
+Paper bankroll $501.04 | open=4 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:02:10,131 execution INFO: Order accepted: paper-da95cf1f7d46 BUY 8.55@0.5847 Up family=toxicity_mm
+2026-04-01 01:02:10,131 execution INFO: Order accepted: paper-5cc914fc66a3 SELL 8.55@0.5853 Up family=toxicity_mm
+2026-04-01 01:02:10,133 execution INFO: Order filled: paper-042a48686664 family=toxicity_mm realized_delta=0.0000
+Paper bankroll $501.04 | open=5 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:02:20,644 execution INFO: Order filled: paper-da95cf1f7d46 family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:02:20,650 execution INFO: Order accepted: paper-e61d47d39d36 BUY 8.7@0.5747 Up family=toxicity_mm
+2026-04-01 01:02:20,650 execution INFO: Order accepted: paper-9c51d22c988a SELL 8.7@0.5753 Up family=toxicity_mm
+Paper bankroll $501.04 | open=6 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:02:31,000 execution INFO: Order filled: paper-9073eea6ce16 family=toxicity_mm realized_delta=0.5264
+2026-04-01 01:02:31,002 execution INFO: Order accepted: paper-23be1f4b9c09 BUY 7.75@0.6447 Up family=toxicity_mm
+2026-04-01 01:02:31,002 execution INFO: Order accepted: paper-16e535156229 SELL 7.75@0.6453 Up family=toxicity_mm
+2026-04-01 01:02:31,005 execution INFO: Order filled: paper-e61d47d39d36 family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:02:31,006 execution INFO: Order filled: paper-1b86a22dbe5e family=toxicity_mm realized_delta=0.6186
+2026-04-01 01:02:31,007 execution INFO: Order accepted: paper-8c25af6a67a9 BUY 10.75@0.4648 Up family=toxicity_mm
+2026-04-01 01:02:31,007 execution INFO: Order accepted: paper-7c519907c0b8 SELL 10.75@0.4652 Up family=toxicity_mm
+Paper bankroll $502.18 | open=5 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:02:41,420 execution INFO: Order filled: paper-5cc914fc66a3 family=toxicity_mm realized_delta=2.4795
+2026-04-01 01:02:41,422 execution INFO: Order accepted: paper-98ec1237e35b BUY 6.29@0.7946 Up family=toxicity_mm
+2026-04-01 01:02:41,422 execution INFO: Order accepted: paper-e76aec77108b SELL 6.29@0.7954 Up family=toxicity_mm
+2026-04-01 01:02:41,422 execution INFO: Order filled: paper-16e535156229 family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:02:41,423 execution INFO: Order filled: paper-4f6270ca025b family=toxicity_mm realized_delta=0.7080
+2026-04-01 01:02:41,424 execution INFO: Order accepted: paper-d210305f84fb BUY 7.75@0.6447 Up family=toxicity_mm
+2026-04-01 01:02:41,424 execution INFO: Order accepted: paper-067b7062bccb SELL 7.75@0.6453 Up family=toxicity_mm
+2026-04-01 01:02:41,426 execution INFO: Order filled: paper-9c51d22c988a family=toxicity_mm realized_delta=0.8700
+2026-04-01 01:02:41,426 execution INFO: Order filled: paper-7c519907c0b8 family=toxicity_mm realized_delta=0.0000
+Paper bankroll $506.24 | open=4 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:02:51,822 execution INFO: Order filled: paper-98ec1237e35b family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:02:51,825 execution INFO: Order filled: paper-d210305f84fb family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:02:51,828 execution INFO: Order accepted: paper-df6c0ef061a5 BUY 8.13@0.6147 Up family=toxicity_mm
+2026-04-01 01:02:51,828 execution INFO: Order accepted: paper-427523a34874 SELL 8.13@0.6153 Up family=toxicity_mm
+Paper bankroll $506.24 | open=6 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:03:02,272 execution INFO: Order filled: paper-df6c0ef061a5 family=toxicity_mm realized_delta=0.0000
+Paper bankroll $506.24 | open=7 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+Paper bankroll $506.24 | open=7 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:03:23,224 execution INFO: Order accepted: paper-bc96affca5fa BUY 8.7@0.5747 Up family=toxicity_mm
+2026-04-01 01:03:23,224 execution INFO: Order accepted: paper-f695951c22a5 SELL 8.7@0.5753 Up family=toxicity_mm
+Paper bankroll $506.24 | open=7 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:03:33,674 execution INFO: Order filled: paper-bc96affca5fa family=toxicity_mm realized_delta=0.0000
+Paper bankroll $506.24 | open=8 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:03:44,214 execution INFO: Order filled: paper-f695951c22a5 family=toxicity_mm realized_delta=0.2610
+Paper bankroll $506.50 | open=7 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:03:54,656 execution INFO: Order filled: paper-510ae40e0bb2 family=toxicity_mm realized_delta=1.1220
+2026-04-01 01:03:54,669 execution INFO: Order filled: paper-8c25af6a67a9 family=toxicity_mm realized_delta=0.7525
+2026-04-01 01:03:54,670 execution INFO: Order accepted: paper-6769732e4824 BUY 11.49@0.4348 Up family=toxicity_mm
+2026-04-01 01:03:54,670 execution INFO: Order accepted: paper-0b7bbc3a3dec SELL 11.49@0.4352 Up family=toxicity_mm
+Paper bankroll $508.37 | open=5 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:04:05,847 execution INFO: Order filled: paper-6769732e4824 family=toxicity_mm realized_delta=0.0000
+Paper bankroll $508.37 | open=6 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:04:16,897 execution INFO: Order accepted: paper-921905c364e7 BUY 10.1@0.4948 Up family=toxicity_mm
+2026-04-01 01:04:16,898 execution INFO: Order accepted: paper-ab7daf429e08 SELL 10.1@0.4952 Up family=toxicity_mm
+Paper bankroll $508.37 | open=6 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:04:27,433 execution INFO: Order filled: paper-921905c364e7 family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:04:27,442 execution INFO: Order accepted: paper-57cb6d696d9e BUY 8.13@0.6147 Up family=toxicity_mm
+2026-04-01 01:04:27,442 execution INFO: Order accepted: paper-4e17096fa9e4 SELL 8.13@0.6153 Up family=toxicity_mm
+Paper bankroll $508.37 | open=7 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:04:37,838 execution INFO: Order filled: paper-4e17096fa9e4 family=toxicity_mm realized_delta=0.0000
+Paper bankroll $508.37 | open=8 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+Paper bankroll $508.37 | open=8 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:04:58,848 execution INFO: Order filled: paper-78ef18f05c7a family=toxicity_mm realized_delta=1.2120
+2026-04-01 01:04:58,849 execution INFO: Order accepted: paper-1072f2cef166 BUY 10.53@0.4748 Up family=toxicity_mm
+2026-04-01 01:04:58,849 execution INFO: Order accepted: paper-3008750016fd SELL 10.53@0.4752 Up family=toxicity_mm
+2026-04-01 01:04:58,850 execution INFO: Order filled: paper-57cb6d696d9e family=toxicity_mm realized_delta=0.4065
+Paper bankroll $509.99 | open=6 | resolved=0 | pending=0
+Discovered 8 strict interval markets
+2026-04-01 01:05:09,414 execution INFO: Order filled: paper-1072f2cef166 family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:05:09,417 execution INFO: Order cancelled: paper-ab7daf429e08
+2026-04-01 01:05:09,458 execution INFO: Order cancelled: paper-e76aec77108b
+2026-04-01 01:05:09,498 execution INFO: Order cancelled: paper-23be1f4b9c09
+2026-04-01 01:05:09,530 execution INFO: Order cancelled: paper-067b7062bccb
+Paper bankroll $509.99 | open=7 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+2026-04-01 01:05:19,962 execution INFO: Order accepted: paper-98d7a5d9818a BUY 12.05@0.4148 Up family=toxicity_mm
+2026-04-01 01:05:19,962 execution INFO: Order accepted: paper-8028d8e57200 SELL 12.05@0.4152 Up family=toxicity_mm
+Paper bankroll $509.99 | open=7 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+2026-04-01 01:05:30,434 execution INFO: Order filled: paper-98d7a5d9818a family=toxicity_mm realized_delta=0.0000
+Paper bankroll $509.99 | open=8 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+2026-04-01 01:05:40,978 execution INFO: Order filled: paper-8028d8e57200 family=toxicity_mm realized_delta=0.1205
+2026-04-01 01:05:40,979 execution INFO: Order accepted: paper-890e92386709 BUY 11.76@0.4248 Up family=toxicity_mm
+2026-04-01 01:05:40,979 execution INFO: Order accepted: paper-8d6c1e850dfe SELL 11.76@0.4252 Up family=toxicity_mm
+Paper bankroll $510.11 | open=7 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+2026-04-01 01:05:51,363 execution INFO: Order accepted: paper-66a3d7fd9e7f BUY 11.24@0.4448 Up family=toxicity_mm
+2026-04-01 01:05:51,363 execution INFO: Order accepted: paper-c16dd62a5d79 SELL 11.24@0.4452 Up family=toxicity_mm
+2026-04-01 01:05:51,364 execution INFO: Order filled: paper-8d6c1e850dfe family=toxicity_mm realized_delta=0.0000
+Paper bankroll $510.11 | open=8 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+2026-04-01 01:06:01,998 execution INFO: Order accepted: paper-4a08cf126a54 BUY 11.76@0.4248 Up family=toxicity_mm
+2026-04-01 01:06:01,998 execution INFO: Order accepted: paper-6e1ad04e7d31 SELL 11.76@0.4252 Up family=toxicity_mm
+2026-04-01 01:06:01,999 execution INFO: Order filled: paper-c16dd62a5d79 family=toxicity_mm realized_delta=0.0000
+2026-04-01 01:06:02,010 execution INFO: Order accepted: paper-7a2318e8b667 BUY 9.52@0.5248 Up family=toxicity_mm
+2026-04-01 01:06:02,010 execution INFO: Order accepted: paper-8a0e7e2ce0f6 SELL 9.52@0.5252 Up family=toxicity_mm
+Paper bankroll $510.11 | open=9 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+2026-04-01 01:06:12,768 execution INFO: Order cancelled: paper-4a08cf126a54
+2026-04-01 01:06:12,768 execution INFO: Order cancelled: paper-6e1ad04e7d31
+2026-04-01 01:06:12,768 execution INFO: Order accepted: paper-d881711634fe BUY 11.76@0.4248 Up family=toxicity_mm
+2026-04-01 01:06:12,768 execution INFO: Order accepted: paper-9be3e017190a SELL 11.76@0.4252 Up family=toxicity_mm
+2026-04-01 01:06:12,773 execution INFO: Order filled: paper-8a0e7e2ce0f6 family=toxicity_mm realized_delta=0.0000
+Paper bankroll $510.11 | open=10 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+2026-04-01 01:06:24,104 execution INFO: Order filled: paper-9be3e017190a family=toxicity_mm realized_delta=0.0000
+Paper bankroll $510.11 | open=11 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+Paper bankroll $510.11 | open=11 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+Paper bankroll $510.11 | open=11 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+2026-04-01 01:06:55,928 execution INFO: Order filled: paper-d881711634fe family=toxicity_mm realized_delta=0.5880
+Paper bankroll $510.70 | open=10 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+2026-04-01 01:07:06,386 execution INFO: Order accepted: paper-30135b70dc23 BUY 11.49@0.4348 Up family=toxicity_mm
+2026-04-01 01:07:06,386 execution INFO: Order accepted: paper-d63476d4b1a8 SELL 11.49@0.4352 Up family=toxicity_mm
+Paper bankroll $510.70 | open=10 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+2026-04-01 01:07:16,809 execution INFO: Order filled: paper-30135b70dc23 family=toxicity_mm realized_delta=0.0000
+Paper bankroll $510.70 | open=11 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+Paper bankroll $510.70 | open=11 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+Paper bankroll $510.70 | open=11 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+Paper bankroll $510.70 | open=11 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+Paper bankroll $510.70 | open=11 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+Paper bankroll $510.70 | open=11 | resolved=0 | pending=4
+Discovered 8 strict interval markets
+2026-04-01 01:08:19,637 execution INFO: Order filled: paper-890e92386709 family=toxicity_mm realized_delta=1.4112
+2026-04-01 01:08:19,640 execution INFO: Order filled: paper-7a2318e8b667 family=toxicity_mm realized_delta=0.6664
+Paper bankroll $499.94 | open=6 | resolved=3 | pending=1

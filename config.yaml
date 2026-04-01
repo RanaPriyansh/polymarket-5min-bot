@@ -22,8 +22,8 @@ risk:
   max_risk_per_trade_usd: 10
 filters:
   max_book_spread_bps: 250
-  min_top_depth: 25
-  min_top_notional: 10
+  min_top_depth: 5
+  min_top_notional: 1
   max_depth_ratio: 12
 execution:
   paper_starting_bankroll: 500
@@ -38,6 +38,8 @@ strategies:
   mean_reversion_5min:
     deviation_threshold: 0.08
     ema_period: 20
+    ema_period_5m: 5
+    ema_period_15m: 20
     imbalance_threshold: 0.3
     kelly_fraction: 0.25
     min_volume: 10000

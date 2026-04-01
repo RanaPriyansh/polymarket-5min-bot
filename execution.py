@@ -441,6 +441,13 @@ class PolymarketExecutor:
     def _market_has_open_exposure(self, market_id: str) -> bool:
         return any(position.quantity != 0 for (_, candidate_market_id, _), position in self.positions.items() if candidate_market_id == market_id)
 
+    def has_strategy_market_exposure(self, strategy_family: str, market_id: str) -> bool:
+        return any(
+            position.quantity != 0
+            for (family, candidate_market_id, _), position in self.positions.items()
+            if family == strategy_family and candidate_market_id == market_id
+        )
+
     def _update_pending_resolution(self, slot_id: str, now_ts: float) -> Dict:
         state = self.pending_resolution.get(slot_id)
         if state is None:

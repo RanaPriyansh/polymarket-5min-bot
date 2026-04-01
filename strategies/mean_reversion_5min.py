@@ -30,6 +30,10 @@ class MeanReversion5Min:
         params = config["strategies"]["mean_reversion_5min"]
         filters = config.get("filters", {})
         self.ema_period = params["ema_period"]
+        self.ema_period_by_interval = {
+            5: params.get("ema_period_5m", params["ema_period"]),
+            15: params.get("ema_period_15m", params["ema_period"]),
+        }
         self.dev_threshold = params["deviation_threshold"]
         self.imbalance_threshold = params["imbalance_threshold"]
         self.kelly_fraction = params["kelly_fraction"]
@@ -42,7 +46,10 @@ class MeanReversion5Min:
         self.price_history = {}
         self.volatility_estimate = 0.05
 
-    def update_price(self, market_id: str, price: float, timestamp: float, volume: float = 0):
+    def _ema_period_for_interval(self, interval_minutes: Optional[int]) -> int:
+        return self.ema_period_by_interval.get(interval_minutes, self.ema_period)
+
+    def update_price(self, market_id: str, price: float, timestamp: float, volume: float = 0, interval_minutes: Optional[int] = None):
         if market_id not in self.price_history:
             self.price_history[market_id] = pd.DataFrame(columns=["ts", "price", "volume"])
         df = self.price_history[market_id]
@@ -50,14 +57,15 @@ class MeanReversion5Min:
         if len(df) > 1000:
             self.price_history[market_id] = df.iloc[-1000:].reset_index(drop=True)
 
-    def calculate_ema(self, market_id: str) -> Optional[float]:
+    def calculate_ema(self, market_id: str, interval_minutes: Optional[int] = None) -> Optional[float]:
         df = self.price_history.get(market_id)
-        if df is None or len(df) < self.ema_period:
+        ema_period = self._ema_period_for_interval(interval_minutes)
+        if df is None or len(df) < ema_period:
             return None
-        return df["price"].ewm(span=self.ema_period, adjust=False).mean().iloc[-1]
+        return df["price"].ewm(span=ema_period, adjust=False).mean().iloc[-1]
 
-    def calculate_deviation(self, market_id: str, current_price: float) -> Optional[float]:
-        ema = self.calculate_ema(market_id)
+    def calculate_deviation(self, market_id: str, current_price: float, interval_minutes: Optional[int] = None) -> Optional[float]:
+        ema = self.calculate_ema(market_id, interval_minutes=interval_minutes)
         if ema is None:
             return None
         return (current_price - ema) / ema
@@ -73,7 +81,7 @@ class MeanReversion5Min:
         )
 
     def generate_signal(self, market_id: str, outcome: str, price: float,
-                        orderbook: OrderBook, volume: float) -> Optional[Signal]:
+                        orderbook: OrderBook, volume: float, interval_minutes: Optional[int] = None) -> Optional[Signal]:
         if volume < self.min_volume:
             return None
 
@@ -81,7 +89,7 @@ class MeanReversion5Min:
         if not quality.is_tradeable:
             return None
 
-        dev = self.calculate_deviation(market_id, price)
+        dev = self.calculate_deviation(market_id, price, interval_minutes=interval_minutes)
         if dev is None:
             return None
 

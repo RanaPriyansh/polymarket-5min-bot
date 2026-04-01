@@ -214,7 +214,13 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
 
                         fill_events.extend(executor.evaluate_market_orders(market_id, orderbook))
                         mid = md.mid_price(orderbook, primary_outcome)
-                        mean_rev.update_price(market_id, mid, loop_now, float(market.get("volume", 0)))
+                        mean_rev.update_price(
+                            market_id,
+                            mid,
+                            loop_now,
+                            float(market.get("volume", 0)),
+                            interval_minutes=market.get("interval_minutes"),
+                        )
 
                         if "mean_reversion_5min" in active_strategies:
                             executor.note_market_seen("mean_reversion_5min")
@@ -240,7 +246,14 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         volume = float(market.get("volume", 0))
 
                         if "mean_reversion_5min" in active_strategies:
-                            signal = mean_rev.generate_signal(market_id, primary_outcome, mid, orderbook, volume)
+                            signal = mean_rev.generate_signal(
+                                market_id,
+                                primary_outcome,
+                                mid,
+                                orderbook,
+                                volume,
+                                interval_minutes=market.get("interval_minutes"),
+                            )
                             if signal:
                                 signal.size = risk_mgr.cap_requested_size(max(mid, 0.01), signal.size)
                                 if signal.size > 0:
@@ -259,6 +272,13 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     "market_slug": market["slug"],
                                     "strategy_family": "toxicity_mm",
                                     "reasons": list(quality.reasons),
+                                })
+                            elif executor.has_strategy_market_exposure("toxicity_mm", market_id):
+                                runtime.append_event("quote.skipped", {
+                                    "market_id": market_id,
+                                    "market_slug": market["slug"],
+                                    "strategy_family": "toxicity_mm",
+                                    "reasons": ["existing_market_exposure"],
                                 })
                             else:
                                 await executor.cancel_family_market(market_id, "toxicity_mm")

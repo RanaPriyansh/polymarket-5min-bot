@@ -2,89 +2,146 @@
   "active_slots": [
     {
       "asset": "btc",
-      "end_ts": 1775014200.0,
+      "end_ts": 1775016600.0,
       "interval_minutes": 5,
-      "market_id": "1799892",
-      "market_slug": "btc-updown-5m-1775013900",
-      "slot_id": "btc:5:1775013900"
+      "market_id": "1800307",
+      "market_slug": "btc-updown-5m-1775016300",
+      "slot_id": "btc:5:1775016300"
     },
     {
       "asset": "eth",
-      "end_ts": 1775014200.0,
+      "end_ts": 1775016600.0,
       "interval_minutes": 5,
-      "market_id": "1799895",
-      "market_slug": "eth-updown-5m-1775013900",
-      "slot_id": "eth:5:1775013900"
+      "market_id": "1800306",
+      "market_slug": "eth-updown-5m-1775016300",
+      "slot_id": "eth:5:1775016300"
     },
     {
       "asset": "sol",
-      "end_ts": 1775014200.0,
+      "end_ts": 1775016600.0,
       "interval_minutes": 5,
-      "market_id": "1799893",
-      "market_slug": "sol-updown-5m-1775013900",
-      "slot_id": "sol:5:1775013900"
+      "market_id": "1800304",
+      "market_slug": "sol-updown-5m-1775016300",
+      "slot_id": "sol:5:1775016300"
     },
     {
       "asset": "xrp",
-      "end_ts": 1775014200.0,
+      "end_ts": 1775016600.0,
       "interval_minutes": 5,
-      "market_id": "1799889",
-      "market_slug": "xrp-updown-5m-1775013900",
-      "slot_id": "xrp:5:1775013900"
+      "market_id": "1800303",
+      "market_slug": "xrp-updown-5m-1775016300",
+      "slot_id": "xrp:5:1775016300"
     },
     {
       "asset": "btc",
-      "end_ts": 1775014200.0,
+      "end_ts": 1775016900.0,
       "interval_minutes": 15,
-      "market_id": "1799863",
-      "market_slug": "btc-updown-15m-1775013300",
-      "slot_id": "btc:15:1775013300"
+      "market_id": "1800274",
+      "market_slug": "btc-updown-15m-1775016000",
+      "slot_id": "btc:15:1775016000"
     },
     {
       "asset": "eth",
-      "end_ts": 1775014200.0,
+      "end_ts": 1775016900.0,
       "interval_minutes": 15,
-      "market_id": "1799870",
-      "market_slug": "eth-updown-15m-1775013300",
-      "slot_id": "eth:15:1775013300"
+      "market_id": "1800262",
+      "market_slug": "eth-updown-15m-1775016000",
+      "slot_id": "eth:15:1775016000"
     },
     {
       "asset": "sol",
-      "end_ts": 1775014200.0,
+      "end_ts": 1775016900.0,
       "interval_minutes": 15,
-      "market_id": "1799866",
-      "market_slug": "sol-updown-15m-1775013300",
-      "slot_id": "sol:15:1775013300"
+      "market_id": "1800265",
+      "market_slug": "sol-updown-15m-1775016000",
+      "slot_id": "sol:15:1775016000"
     },
     {
       "asset": "xrp",
-      "end_ts": 1775014200.0,
+      "end_ts": 1775016900.0,
       "interval_minutes": 15,
-      "market_id": "1799862",
-      "market_slug": "xrp-updown-15m-1775013300",
-      "slot_id": "xrp:15:1775013300"
+      "market_id": "1800279",
+      "market_slug": "xrp-updown-15m-1775016000",
+      "slot_id": "xrp:15:1775016000"
     }
   ],
-  "bankroll": 500.0,
+  "bankroll": 499.9396,
   "fetched_markets": 8,
-  "heartbeat_ts": 1775014076.781079,
-  "latest_settlement": null,
-  "loop_count": 1,
-  "mode": "paper",
-  "open_position_count": 0,
-  "pending_resolution_slots": [],
-  "phase": "stopped",
-  "positions": {},
-  "processed_markets": 0,
-  "resolved_trade_count": 0,
-  "risk": {
-    "capital": 500.0,
-    "daily_pnl": 0.0,
-    "max_drawdown": 0.0,
-    "peak": 500.0,
-    "positions": 0
+  "heartbeat_ts": 1775016499.85325,
+  "latest_settlement": {
+    "average_price": 0.6,
+    "event_type": "market.settled",
+    "market_id": "1800263",
+    "market_slug": "xrp-updown-5m-1775016000",
+    "outcome": "Up",
+    "payout": 0.0,
+    "quantity": 7.75,
+    "realized_pnl_delta": -4.6499999999999995,
+    "settled_ts": 1775016499.642106,
+    "slot_id": "xrp:5:1775016000",
+    "strategy_family": "toxicity_mm",
+    "winning_outcome": "Down"
   },
-  "run_id": "paper-1775014076-2b1dbb84",
+  "loop_count": 40,
+  "mode": "paper",
+  "open_position_count": 6,
+  "pending_resolution_slots": [
+    {
+      "deferred": false,
+      "market_slug": "sol-updown-5m-1775016000",
+      "next_poll_ts": 1775016559.642106,
+      "slot_id": "sol:5:1775016000"
+    }
+  ],
+  "phase": "stopped",
+  "positions": {
+    "toxicity_mm:1800262:Up": {
+      "average_price": 0.56,
+      "market_slug": "eth-updown-15m-1775016000",
+      "quantity": 8.13,
+      "slot_id": "eth:15:1775016000"
+    },
+    "toxicity_mm:1800272:Up": {
+      "average_price": 0.86,
+      "market_slug": "sol-updown-5m-1775016000",
+      "quantity": -7.75,
+      "slot_id": "sol:5:1775016000"
+    },
+    "toxicity_mm:1800274:Up": {
+      "average_price": 0.37,
+      "market_slug": "btc-updown-15m-1775016000",
+      "quantity": 10.53,
+      "slot_id": "btc:15:1775016000"
+    },
+    "toxicity_mm:1800279:Up": {
+      "average_price": 0.4,
+      "market_slug": "xrp-updown-15m-1775016000",
+      "quantity": 11.49,
+      "slot_id": "xrp:15:1775016000"
+    },
+    "toxicity_mm:1800306:Up": {
+      "average_price": 0.5,
+      "market_slug": "eth-updown-5m-1775016300",
+      "quantity": -11.24,
+      "slot_id": "eth:5:1775016300"
+    },
+    "toxicity_mm:1800307:Up": {
+      "average_price": 0.34,
+      "market_slug": "btc-updown-5m-1775016300",
+      "quantity": 11.49,
+      "slot_id": "btc:5:1775016300"
+    }
+  },
+  "processed_markets": 1,
+  "resolved_trade_count": 3,
+  "risk": {
+    "capital": 499.93960000000004,
+    "daily_pnl": -0.06039999999999779,
+    "max_drawdown": 0.021072970987363267,
+    "peak": 510.70160000000004,
+    "positions": 6
+  },
+  "run_id": "paper-1775016083-c18dc8d1",
   "strategies": [
     "mean_reversion_5min",
     "toxicity_mm"
@@ -92,23 +149,23 @@
   "strategy_metrics": {
     "mean_reversion_5min": {
       "cancellations": 0,
-      "markets_seen": 8,
+      "markets_seen": 320,
       "orders_filled": 0,
       "orders_resting": 0,
       "quotes_submitted": 0,
       "realized_pnl": 0.0,
-      "toxic_book_skips": 8
+      "toxic_book_skips": 200
     },
     "toxicity_mm": {
-      "cancellations": 0,
-      "markets_seen": 8,
-      "orders_filled": 0,
-      "orders_resting": 0,
-      "quotes_submitted": 0,
-      "realized_pnl": 0.0,
-      "toxic_book_skips": 8
+      "cancellations": 6,
+      "markets_seen": 320,
+      "orders_filled": 41,
+      "orders_resting": 5,
+      "quotes_submitted": 52,
+      "realized_pnl": -0.0604,
+      "toxic_book_skips": 218
     }
   },
-  "toxic_skips": 8,
+  "toxic_skips": 7,
   "win_rate": 0.0
 }
