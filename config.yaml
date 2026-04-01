@@ -21,14 +21,14 @@ risk:
   max_position_size: 0.1
   max_risk_per_trade_usd: 10
 filters:
-  max_book_spread_bps: 250
-  min_top_depth: 5
-  min_top_notional: 1
+  max_book_spread_bps: 500
+  min_top_depth: 2
+  min_top_notional: 0.5
   max_depth_ratio: 12
 execution:
   paper_starting_bankroll: 500
   mm_paper_max_notional_usd: 5
-  quote_refresh_seconds: 30
+  quote_refresh_seconds: 10
   resolution_initial_poll_seconds: 10
   resolution_poll_cap_seconds: 300
 strategies:
@@ -36,13 +36,13 @@ strategies:
   - mean_reversion_5min
   - toxicity_mm
   mean_reversion_5min:
-    deviation_threshold: 0.08
+    deviation_threshold: 0.05
     ema_period: 20
-    ema_period_5m: 5
+    ema_period_5m: 3
     ema_period_15m: 20
-    imbalance_threshold: 0.3
+    imbalance_threshold: 0.2
     kelly_fraction: 0.25
-    min_volume: 10000
+    min_volume: 5000
     timeframes:
     - 5m
     - 15m
@@ -53,10 +53,18 @@ strategies:
     timeframes:
     - 5m
     - 15m
-    vpin_threshold: 0.45
+    vpin_threshold: 0.5
+  opening_range:
+    opening_range_ticks: 3
+    breakout_pct: 0.3
+    min_volume: 5000
+  time_decay:
+    min_seconds_left: 10
+    max_seconds_left: 60
+    min_price: 0.55
 runtime:
   dir: data/runtime
 telegram:
-  bot_token: YOUR_BOT_TOKEN
-  chat_id: YOUR_CHAT_ID
+  bot_token: 8169107053:AAFFe3pUZlbwUzFtuMUPVInjc8sgwmjbI9g
+  chat_id: "7364191237"
   enabled: true
