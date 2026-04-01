@@ -1,0 +1,17 @@
+[Unit]
+Description=Polymarket Paper Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/obsidian-hermes-vault/projects/polymarket-5min-bot
+EnvironmentFile=-/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.env
+ExecStart=/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python /root/obsidian-hermes-vault/projects/polymarket-5min-bot/cli.py run --mode paper --runtime-dir /root/obsidian-hermes-vault/projects/polymarket-5min-bot/data/runtime --sleep-seconds 60
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

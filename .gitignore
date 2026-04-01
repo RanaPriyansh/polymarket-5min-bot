@@ -1,10 +1,8 @@
 __pycache__/
-*.py[cod]
-
-.DS_Store
+*.pyc
+data/runtime/
+data/collection_*.csv
+data/sample_backtest.csv
+logs/
 .env
 .venv/
-venv/
-
-data/runtime/
-logs/
