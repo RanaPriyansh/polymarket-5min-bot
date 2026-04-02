@@ -1,3 +1,11 @@
+__pycache__/
+*.pyc
+data/runtime/
+data/collection_*.csv
+data/sample_backtest.csv
+logs/
+.env
+.venv/
 .venv/
 __pycache__/
 *.pyc

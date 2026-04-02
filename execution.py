@@ -147,7 +147,7 @@ class PolymarketExecutor:
             order["market_end_ts"] = market["end_ts"]
 
         if self.mode == "live":
-            token_id = market["token_ids"].get(outcome) if market else self._get_token_id(market_id, outcome)
+            token_id = market["token_ids"][outcome] if market else self._get_token_id(market_id, outcome)
             payload = {
                 "market_id": market_id,
                 "token_id": token_id,

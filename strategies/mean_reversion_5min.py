@@ -39,9 +39,9 @@ class MeanReversion5Min:
         self.kelly_fraction = params["kelly_fraction"]
         self.timeframes = params["timeframes"]
         self.min_volume = params["min_volume"]
-        self.max_book_spread_bps = filters.get("max_book_spread_bps", 250)
-        self.min_top_depth = filters.get("min_top_depth", 25)
-        self.min_top_notional = filters.get("min_top_notional", 10)
+        self.max_book_spread_bps = filters.get("max_book_spread_bps", 500)
+        self.min_top_depth = filters.get("min_top_depth", 2)
+        self.min_top_notional = filters.get("min_top_notional", 0.5)
         self.max_depth_ratio = filters.get("max_depth_ratio", 12)
         self.price_history = {}
         self.volatility_estimate = 0.05

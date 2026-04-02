@@ -110,7 +110,7 @@ def _enforce_clock_drift(drift_seconds: float) -> None:
 
 @cli.command()
 @click.option("--mode", type=click.Choice(["backtest", "paper", "live"]), default="paper", help="Execution mode")
-@click.option("--strategies", default="mean_reversion_5min,toxicity_mm", help="Comma-separated active strategies")
+@click.option("--strategies", default="toxicity_mm", help="Comma-separated active strategies")
 @click.option("--max-loops", type=int, default=0, help="Bounded loop count for smoke tests")
 @click.option("--runtime-dir", default="data/runtime", help="Directory for durable runtime telemetry")
 @click.option("--sleep-seconds", type=int, default=15, help="Loop sleep duration")
@@ -131,6 +131,13 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     cfg["strategies"]["active"] = active_strategies
     filters = cfg.get("filters", {})
     initial_capital = float(cfg.get("execution", {}).get("paper_starting_bankroll", 500.0))
+
+    # Relax book-quality filters for paper mode so ToxicityMM can actually place quotes
+    if mode == "paper":
+        filters.setdefault("max_book_spread_bps", 1000)
+        filters.setdefault("min_top_depth", 5)
+        filters.setdefault("min_top_notional", 1)
+        filters.setdefault("max_depth_ratio", 30)
 
     click.echo(f"Starting bot in {mode} mode with strategies: {','.join(active_strategies)}")
     click.echo("Press Ctrl+C to stop.")

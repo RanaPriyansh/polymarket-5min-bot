@@ -7,6 +7,8 @@ set -euo pipefail
 # ROLLBACK:
 #   sudo systemctl stop polymarket-paper-bot
 #   sudo systemctl disable polymarket-paper-bot
+#   sudo cp /etc/systemd/system/polymarket-paper-bot.service.bak \
+#      /etc/systemd/system/polymarket-paper-bot.service
 #   sudo cp /etc/systemd/system/polymarket-paper-bot.service.bak /etc/systemd/system/polymarket-paper-bot.service
 #   sudo systemctl daemon-reload
 
@@ -26,6 +28,10 @@ if [ ! -f "$SERVICE_FILE" ]; then
     exit 1
 fi
 
+echo "=== Polymarket Paper Bot — systemd install ==="
+echo "Source:      $SERVICE_FILE"
+echo "Destination: $TARGET"
+echo ""
 echo "Installing polymarket-paper-bot.service ..."
 
 # Backup existing unit if present
@@ -34,6 +40,12 @@ if [ -f "$TARGET" ]; then
     echo "Backed up existing unit -> $TARGET.bak"
 fi
 
+# Install
+cp "$SERVICE_FILE" "$TARGET"
+chmod 644 "$TARGET"
+echo "Installed unit file."
+
+# Activate
 cp "$SERVICE_FILE" "$TARGET"
 chmod 644 "$TARGET"
 
@@ -47,6 +59,17 @@ systemctl status polymarket-paper-bot --no-pager
 
 echo ""
 echo "=== Recent logs ==="
+journalctl -u polymarket-paper-bot --no-pager -n 30
+
+echo ""
+echo "Status:  systemctl status polymarket-paper-bot"
+echo "Follow:  journalctl -u polymarket-paper-bot -f"
+echo "Stop:    sudo systemctl stop polymarket-paper-bot"
+echo ""
+echo "Rollback:"
+echo "  sudo cp $TARGET.bak $TARGET"
+echo "  sudo systemctl daemon-reload"
+echo "  sudo systemctl restart polymarket-paper-bot"
 journalctl -u polymarket-paper-bot --no-pager -n 20
 
 echo ""
