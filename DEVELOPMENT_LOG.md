@@ -20,6 +20,14 @@
 - Order book collection scripts for backtesting
 - Initial README with setup instructions
 
+## April 2, 2026
+- Wired runtime executor to ledger-backed truth path using SQLiteLedger + replay restore.
+- Runtime now persists order_created, order_acknowledged, order_cancelled, fill_observed, fill_applied, slot_resolution_pending, and slot_settled events.
+- Added replay-backed exposure projection in exposure.py and extended replay.py with resolved trade stats, latest settlement, and exposure snapshot derivation.
+- Moved runtime risk reporting off fragile in-memory deltas and onto executor snapshot + ledger event replay inputs.
+- Added restart-stability tests for ledger restore, settlement restore, replay exposure, and replay-derived risk reporting.
+- Full suite now passing at 30 tests.
+
 ## Key Technical Decisions
 1. **Book Quality Filtering**: Added institutional-grade order book assessment to avoid toxic flows and manipulation
 2. **VPIN-Based Market Making**: Using Volume-Synchronized Probability of Informed Trading to detect adverse selection

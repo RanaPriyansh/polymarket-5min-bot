@@ -85,6 +85,13 @@ def _emit_events(runtime: RuntimeTelemetry, events: Iterable[Dict]) -> None:
         runtime.append_event(event_type, payload)
 
 
+def _resolve_active_strategies(cfg: dict, strategies: str | None) -> List[str]:
+    if strategies and strategies.strip():
+        return [item.strip() for item in strategies.split(",") if item.strip()]
+    configured = cfg.get("strategies", {}).get("active", [])
+    return [str(item).strip() for item in configured if str(item).strip()]
+
+
 def _active_slot_summary(markets: List[Dict]) -> List[Dict]:
     return [
         {
@@ -110,7 +117,7 @@ def _enforce_clock_drift(drift_seconds: float) -> None:
 
 @cli.command()
 @click.option("--mode", type=click.Choice(["backtest", "paper", "live"]), default="paper", help="Execution mode")
-@click.option("--strategies", default="toxicity_mm", help="Comma-separated active strategies")
+@click.option("--strategies", default=None, help="Comma-separated active strategies (defaults to config.yaml strategies.active)")
 @click.option("--max-loops", type=int, default=0, help="Bounded loop count for smoke tests")
 @click.option("--runtime-dir", default="data/runtime", help="Directory for durable runtime telemetry")
 @click.option("--sleep-seconds", type=int, default=15, help="Loop sleep duration")
@@ -127,8 +134,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
         raise click.ClickException("Live mode is deferred until the restored paper workflow is proven.")
 
     cfg = load_cfg()
-    active_strategies = [item.strip() for item in strategies.split(",") if item.strip()]
-    cfg["strategies"]["active"] = active_strategies
+    active_strategies = _resolve_active_strategies(cfg, strategies)
+    cfg.setdefault("strategies", {})["active"] = active_strategies
     filters = cfg.get("filters", {})
     initial_capital = float(cfg.get("execution", {}).get("paper_starting_bankroll", 500.0))
 
@@ -153,12 +160,14 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
             _enforce_clock_drift(startup["clock_drift_seconds"])
             runtime.append_event("runtime.startup_check", startup)
 
+            cfg.setdefault("execution", {})
+            cfg["execution"].setdefault("ledger_db_path", str(Path(runtime_dir) / "ledger.db"))
+
             mean_rev = MeanReversion5Min(cfg)
             mm = ToxicityMM(cfg)
             risk_mgr = RiskManager(cfg, initial_capital=initial_capital)
-            executor = PolymarketExecutor(cfg, md, mode=mode)
+            executor = PolymarketExecutor(cfg, md, mode=mode, run_id=run_id)
             await executor.__aenter__()
-            last_realized_total = 0.0
             loop_count = 0
 
             try:
@@ -323,19 +332,17 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                     settlement_events = await executor.process_pending_resolutions(now_ts=time.time())
                     _emit_events(runtime, settlement_events)
 
-                    realized_total = executor.get_realized_pnl_total()
-                    realized_delta = realized_total - last_realized_total
-                    if realized_delta:
-                        risk_mgr.update_capital(realized_delta)
-                    last_realized_total = realized_total
-
                     positions = await executor.refresh_positions()
                     strategy_metrics = executor.get_family_metrics()
                     runtime.write_strategy_metrics(strategy_metrics)
 
-                    executor_snapshot = executor.get_runtime_snapshot(now_ts=time.time())
-                    risk_report = risk_mgr.get_risk_report()
-                    risk_report["positions"] = executor_snapshot["open_position_count"]
+                    snapshot_ts = time.time()
+                    executor_snapshot = executor.get_runtime_snapshot(now_ts=snapshot_ts)
+                    risk_report = risk_mgr.get_risk_report(
+                        executor_snapshot=executor_snapshot,
+                        ledger_events=executor.get_ledger_events(),
+                        now_ts=snapshot_ts,
+                    )
                     runtime.write_runtime_snapshot(
                         run_id=run_id,
                         phase="running",
@@ -364,7 +371,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         )
                     )
 
-                    if risk_mgr.check_circuit_breakers():
+                    if risk_mgr.check_circuit_breakers(risk_report):
                         runtime.append_event("runtime.circuit_breaker", {"run_id": run_id, "risk": risk_report})
                         click.echo("CIRCUIT BREAKER TRIGGERED — stopping trading")
                         break

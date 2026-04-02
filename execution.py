@@ -5,13 +5,21 @@ Handles paper/live placement, cancellation, paper position lifecycle, and settle
 
 from __future__ import annotations
 
+import copy
+import logging
+import sqlite3
 import time
 import uuid
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-import logging
 
 import aiohttp
+
+from ledger import LedgerEvent, SQLiteLedger
+from paper_exchange import ConservativeFillEngine, FillPolicy, OrderBookSnapshot
+from replay import replay_ledger
+from settlement_engine import SettlementEngine
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +47,15 @@ class SlotState:
 
 
 class PolymarketExecutor:
-    def __init__(self, config: dict, market_data: "PolymarketData", mode: str = "paper"):
+    def __init__(
+        self,
+        config: dict,
+        market_data: "PolymarketData",
+        mode: str = "paper",
+        *,
+        run_id: str | None = None,
+        ledger: SQLiteLedger | None = None,
+    ):
         execution_cfg = config.get("execution", {})
         self.clob_url = config["polymarket"]["clob_api_url"]
         self.wallet_address = config["polymarket"].get("wallet_address", "paper-wallet")
@@ -47,9 +63,19 @@ class PolymarketExecutor:
         self.session = None
         self.md = market_data
         self.mode = mode
+        self.run_id = run_id or execution_cfg.get("run_id") or f"{mode}-runtime"
         self.paper_bankroll = float(execution_cfg.get("paper_starting_bankroll", 500.0))
         self.resolution_initial_poll_seconds = int(execution_cfg.get("resolution_initial_poll_seconds", 10))
         self.resolution_poll_cap_seconds = int(execution_cfg.get("resolution_poll_cap_seconds", 300))
+        fill_policy_cfg = execution_cfg.get("fill_policy", {})
+        self.fill_engine = ConservativeFillEngine(
+            FillPolicy(
+                min_rest_seconds=float(fill_policy_cfg.get("min_rest_seconds", 1.0)),
+                max_fill_fraction_per_snapshot=float(fill_policy_cfg.get("max_fill_fraction_per_snapshot", 0.25)),
+                allow_same_snapshot_fill=bool(fill_policy_cfg.get("allow_same_snapshot_fill", False)),
+            )
+        )
+        self.settlement_engine = SettlementEngine()
         self.orders: Dict[str, Dict] = {}
         self.positions: Dict[Tuple[str, str, str], FamilyPosition] = {}
         self.family_metrics: Dict[str, Dict] = {}
@@ -61,6 +87,11 @@ class PolymarketExecutor:
         self.win_count = 0
         self.loss_count = 0
         self.latest_settlement: Optional[Dict] = None
+        ledger_path = execution_cfg.get("ledger_db_path")
+        self.ledger = ledger or (SQLiteLedger(Path(ledger_path)) if ledger_path else None)
+        self._sequence_counters: Dict[Tuple[str, str], int] = {}
+        if self.ledger is not None:
+            self._restore_from_ledger()
 
     async def __aenter__(self):
         if self.mode == "live":
@@ -71,6 +102,240 @@ class PolymarketExecutor:
         if self.session:
             await self.session.close()
             self.session = None
+
+    def _next_sequence(self, stream: str, aggregate_id: str) -> int:
+        key = (stream, aggregate_id)
+        next_value = self._sequence_counters.get(key, 0) + 1
+        self._sequence_counters[key] = next_value
+        return next_value
+
+    def _track_sequence(self, event: LedgerEvent) -> None:
+        key = (event.stream, event.aggregate_id)
+        self._sequence_counters[key] = max(self._sequence_counters.get(key, 0), int(event.sequence_num))
+
+    def _persist_events(self, *events: LedgerEvent | None) -> list[LedgerEvent]:
+        materialized = [event for event in events if event is not None]
+        if self.ledger is None:
+            return materialized
+
+        appended: list[LedgerEvent] = []
+        for event in materialized:
+            self._track_sequence(event)
+            try:
+                self.ledger.append_event(event)
+                appended.append(event)
+            except sqlite3.IntegrityError:
+                logger.info("Ignoring duplicate ledger event idempotency_key=%s", event.idempotency_key)
+        if materialized:
+            self._restore_from_ledger()
+        return appended
+
+    def _restore_from_ledger(self) -> None:
+        if self.ledger is None:
+            return
+        events = self.ledger.list_events(run_id=self.run_id)
+        projection = replay_ledger(events)
+        self._sequence_counters = {}
+        for event in events:
+            self._track_sequence(event)
+        self.orders = {}
+        for order_id, state in projection.orders.items():
+            order_state = dict(state)
+            size = float(order_state.get("size", 0.0))
+            filled_qty = float(order_state.get("filled_qty", 0.0))
+            order_state.setdefault("remaining_size", max(0.0, size - filled_qty))
+            order_state.setdefault("remaining_qty", max(0.0, size - filled_qty))
+            order_state.setdefault("timestamp", order_state.get("created_ts", order_state.get("event_ts", 0.0)))
+            self.orders[order_id] = order_state
+        self.positions = {
+            key: FamilyPosition(
+                quantity=float(position.get("quantity", 0.0)),
+                average_price=float(position.get("average_price", 0.0)),
+            )
+            for key, position in projection.positions.items()
+            if abs(float(position.get("quantity", 0.0))) > 1e-9
+        }
+        self.pending_resolution = {
+            slot_id: {
+                "slot_id": slot_id,
+                "first_pending_ts": payload.get("first_pending_ts", payload.get("next_poll_ts", 0.0)),
+                "next_poll_ts": payload.get("next_poll_ts", 0.0),
+                "delay_seconds": payload.get("delay_seconds", self.resolution_initial_poll_seconds),
+                "deferred": bool(payload.get("deferred", False)),
+            }
+            for slot_id, payload in projection.pending_slots.items()
+        }
+        self.realized_pnl_total = float(projection.realized_pnl_total)
+        self.resolved_trade_count = int(projection.resolved_trade_count)
+        self.win_count = int(projection.win_count)
+        self.loss_count = int(projection.loss_count)
+        settled = sorted(
+            projection.settled_slots.items(),
+            key=lambda item: float(item[1].get("settled_ts", 0.0)),
+        )
+        self.latest_settlement = None
+        if projection.latest_settlement is not None:
+            self.latest_settlement = {
+                "event_type": "market.settled",
+                **projection.latest_settlement,
+            }
+        elif settled:
+            slot_id, payload = settled[-1]
+            self.latest_settlement = {
+                "event_type": "market.settled",
+                "slot_id": slot_id,
+                **payload,
+            }
+        self._rebuild_signal_slots_from_orders()
+
+    def _rebuild_signal_slots_from_orders(self) -> None:
+        self.signal_slots = {}
+        for (family, market_id, outcome), position in self.positions.items():
+            if family != "mean_reversion_5min" or abs(position.quantity) <= 1e-9:
+                continue
+            matching_order = None
+            for order in self.orders.values():
+                if order.get("market_id") == market_id and order.get("outcome") == outcome and order.get("strategy_family") == family:
+                    matching_order = order
+                    break
+            slot_id = None if matching_order is None else matching_order.get("slot_id")
+            market = self.market_registry.get(slot_id) if slot_id else None
+            if matching_order is None and market is None:
+                continue
+            if slot_id is None and market is not None:
+                slot_id = market.get("slot_id")
+            market_slug = (matching_order or {}).get("market_slug") or (market or {}).get("slug", "")
+            end_ts = float((matching_order or {}).get("market_end_ts", (market or {}).get("end_ts", 0.0)))
+            opened_ts = float((matching_order or {}).get("created_ts", (matching_order or {}).get("timestamp", 0.0)))
+            updated_ts = float((matching_order or {}).get("filled_ts", opened_ts))
+            if slot_id:
+                self.signal_slots[slot_id] = SlotState(
+                    slot_id=slot_id,
+                    market_id=market_id,
+                    market_slug=market_slug,
+                    strategy_family=family,
+                    outcome=outcome,
+                    quantity=position.quantity,
+                    average_price=position.average_price,
+                    opened_ts=opened_ts,
+                    updated_ts=updated_ts,
+                    end_ts=end_ts,
+                )
+
+    def _order_created_event(self, order: Dict) -> LedgerEvent:
+        return LedgerEvent(
+            event_id=f"evt-{uuid.uuid4().hex}",
+            stream="order",
+            aggregate_id=order["order_id"],
+            sequence_num=self._next_sequence("order", order["order_id"]),
+            event_type="order_created",
+            event_ts=float(order.get("timestamp", time.time())),
+            recorded_ts=float(order.get("timestamp", time.time())),
+            run_id=self.run_id,
+            idempotency_key=f"order_created:{order['order_id']}",
+            causation_id=None,
+            correlation_id=order["order_id"],
+            schema_version=1,
+            payload={
+                "market_id": order["market_id"],
+                "slot_id": order.get("slot_id"),
+                "market_slug": order.get("market_slug"),
+                "outcome": order["outcome"],
+                "side": order["side"],
+                "size": float(order["size"]),
+                "price": float(order["price"]),
+                "post_only": bool(order.get("post_only", True)),
+                "strategy_family": order.get("strategy_family", "unknown"),
+                "order_kind": order.get("order_kind", "signal"),
+                "created_ts": float(order.get("timestamp", time.time())),
+                "market_end_ts": order.get("market_end_ts"),
+                "wallet": order.get("wallet", self.wallet_address),
+            },
+        )
+
+    def _order_acknowledged_event(self, order: Dict) -> LedgerEvent:
+        return LedgerEvent(
+            event_id=f"evt-{uuid.uuid4().hex}",
+            stream="order",
+            aggregate_id=order["order_id"],
+            sequence_num=self._next_sequence("order", order["order_id"]),
+            event_type="order_acknowledged",
+            event_ts=float(order.get("timestamp", time.time())),
+            recorded_ts=float(order.get("timestamp", time.time())),
+            run_id=self.run_id,
+            idempotency_key=f"order_ack:{order['order_id']}",
+            causation_id=None,
+            correlation_id=order["order_id"],
+            schema_version=1,
+            payload={
+                "status": order.get("status", "open"),
+                "remaining_qty": float(order.get("remaining_size", order.get("size", 0.0))),
+                "filled_qty": float(order.get("filled_qty", 0.0)),
+                "average_fill_price": float(order.get("average_fill_price", 0.0)),
+            },
+        )
+
+    def _order_cancelled_event(self, order: Dict) -> LedgerEvent:
+        cancelled_ts = time.time()
+        return LedgerEvent(
+            event_id=f"evt-{uuid.uuid4().hex}",
+            stream="order",
+            aggregate_id=order["order_id"],
+            sequence_num=self._next_sequence("order", order["order_id"]),
+            event_type="order_cancelled",
+            event_ts=cancelled_ts,
+            recorded_ts=cancelled_ts,
+            run_id=self.run_id,
+            idempotency_key=f"order_cancelled:{order['order_id']}",
+            causation_id=None,
+            correlation_id=order["order_id"],
+            schema_version=1,
+            payload={
+                "status": "cancelled",
+                "remaining_qty": float(order.get("remaining_size", 0.0)),
+                "filled_qty": float(order.get("filled_qty", 0.0)),
+            },
+        )
+
+    def _direct_fill_observed_event(
+        self,
+        order: Dict,
+        *,
+        fill_price: float,
+        fill_size: float,
+        fill_ts: float,
+    ) -> LedgerEvent:
+        best_bid = fill_price if order["side"].upper() == "SELL" else 0.0
+        best_ask = fill_price if order["side"].upper() == "BUY" else 0.0
+        return LedgerEvent(
+            event_id=f"evt-{uuid.uuid4().hex}",
+            stream="order",
+            aggregate_id=order["order_id"],
+            sequence_num=self._next_sequence("order", order["order_id"]),
+            event_type="fill_observed",
+            event_ts=fill_ts,
+            recorded_ts=fill_ts,
+            run_id=self.run_id,
+            idempotency_key=(
+                f"fill_obs:{order['order_id']}:{self.fill_engine._format_decimal(fill_price)}:"
+                f"{self.fill_engine._format_decimal(fill_size)}:{self.fill_engine._format_decimal(fill_ts)}"
+            ),
+            causation_id=None,
+            correlation_id=order["order_id"],
+            schema_version=1,
+            payload={
+                "market_id": order["market_id"],
+                "slot_id": order.get("slot_id"),
+                "outcome": order["outcome"],
+                "side": order["side"].upper(),
+                "strategy_family": order.get("strategy_family", "unknown"),
+                "fill_price": float(fill_price),
+                "fill_size": float(fill_size),
+                "observed_ts": float(fill_ts),
+                "best_bid": float(best_bid),
+                "best_ask": float(best_ask),
+            },
+        )
 
     def _ensure_family_metrics(self, strategy_family: str) -> Dict:
         metrics = self.family_metrics.setdefault(
@@ -174,6 +439,10 @@ class PolymarketExecutor:
         family_metrics["orders_resting"] += 1
         if order_kind == "quote":
             family_metrics["quotes_submitted"] += 1
+        self._persist_events(
+            self._order_created_event(order),
+            self._order_acknowledged_event(order),
+        )
         logger.info("Order accepted: %s %s %s@%s %s family=%s", order_id, side, size, price, outcome, strategy_family)
         return order_id
 
@@ -195,6 +464,7 @@ class PolymarketExecutor:
         metrics = self._ensure_family_metrics(order["strategy_family"])
         metrics["orders_resting"] = max(0, metrics["orders_resting"] - 1)
         metrics["cancellations"] += 1
+        self._persist_events(self._order_cancelled_event(order))
         logger.info("Order cancelled: %s", order_id)
         return True
 
@@ -220,13 +490,18 @@ class PolymarketExecutor:
         fill_price: Optional[float] = None,
         fill_size: Optional[float] = None,
         fill_ts: Optional[float] = None,
+        observed_event: LedgerEvent | None = None,
     ) -> Dict:
         order = self.orders.get(order_id)
-        if not order or order.get("status") != "open":
+        if not order or order.get("status") not in {"open", "partially_filled", "acknowledged"}:
             return {"filled": False, "reason": "not_open"}
 
-        executed_size = float(fill_size if fill_size is not None else order["remaining_size"])
+        order_before = copy.deepcopy(order)
+        remaining_size = float(order.get("remaining_size", order.get("remaining_qty", order["size"])))
+        executed_size = float(fill_size if fill_size is not None else remaining_size)
         executed_price = float(fill_price if fill_price is not None else order["price"])
+        executed_ts = float(fill_ts if fill_ts is not None else time.time())
+        realized_before = self.realized_pnl_total
         realized_delta = self._apply_fill(
             strategy_family=order["strategy_family"],
             market_id=order["market_id"],
@@ -235,14 +510,40 @@ class PolymarketExecutor:
             size=executed_size,
             price=executed_price,
         )
-        order["remaining_size"] = max(0.0, order["remaining_size"] - executed_size)
-        order["filled_ts"] = fill_ts or time.time()
+        filled_before = float(order.get("filled_qty", 0.0))
+        new_filled_qty = filled_before + executed_size
+        order["filled_qty"] = new_filled_qty
+        order["remaining_size"] = max(0.0, remaining_size - executed_size)
+        order["remaining_qty"] = order["remaining_size"]
+        order["filled_ts"] = executed_ts
         order["fill_price"] = executed_price
-        if order["remaining_size"] <= 1e-9:
-            order["status"] = "filled"
+        previous_notional = filled_before * float(order.get("average_fill_price", 0.0))
+        order["average_fill_price"] = (previous_notional + (executed_size * executed_price)) / new_filled_qty if new_filled_qty > 0 else 0.0
+        order["status"] = "filled" if order["remaining_size"] <= 1e-9 else "partially_filled"
+        if order["status"] == "filled":
             metrics = self._ensure_family_metrics(order["strategy_family"])
             metrics["orders_resting"] = max(0, metrics["orders_resting"] - 1)
             metrics["orders_filled"] += 1
+
+        if observed_event is None:
+            observed_event = self._direct_fill_observed_event(
+                order_before,
+                fill_price=executed_price,
+                fill_size=executed_size,
+                fill_ts=executed_ts,
+            )
+        applied_event = self.fill_engine.apply_fill(
+            order_before,
+            observed_event,
+            sequence_num=self._next_sequence("order", order_id),
+            run_id=self.run_id,
+            correlation_id=order_id,
+        )
+        self._persist_events(observed_event, applied_event)
+        if self.ledger is not None:
+            realized_delta = self.realized_pnl_total - realized_before
+            order = self.orders.get(order_id, order)
+
         logger.info("Order filled: %s family=%s realized_delta=%.4f", order_id, order["strategy_family"], realized_delta)
         return {
             "filled": True,
@@ -261,18 +562,31 @@ class PolymarketExecutor:
     def evaluate_market_orders(self, market_id: str, orderbook: "OrderBook"):
         fills = []
         for order_id, order in list(self.orders.items()):
-            if order["market_id"] != market_id or order["status"] != "open":
+            if order["market_id"] != market_id or order.get("status") not in {"open", "partially_filled", "acknowledged"}:
                 continue
-            best_bid = self.md.best_bid(orderbook, order["outcome"])
-            best_ask = self.md.best_ask(orderbook, order["outcome"])
-            should_fill = (
-                order["side"] == "BUY" and best_ask > 0 and order["price"] >= best_ask
-            ) or (
-                order["side"] == "SELL" and best_bid > 0 and order["price"] <= best_bid
+            snapshot = OrderBookSnapshot(
+                timestamp=float(orderbook.timestamp),
+                best_bid=float(self.md.best_bid(orderbook, order["outcome"])),
+                best_ask=float(self.md.best_ask(orderbook, order["outcome"])),
             )
-            if should_fill:
-                market_price = best_ask if order["side"] == "BUY" else best_bid
-                fills.append(self.fill_order(order_id, fill_price=market_price, fill_ts=orderbook.timestamp))
+            observed = self.fill_engine.observe_fill(
+                order,
+                snapshot,
+                sequence_num=self._next_sequence("order", order_id),
+                run_id=self.run_id,
+                correlation_id=order_id,
+            )
+            if observed is None:
+                continue
+            fills.append(
+                self.fill_order(
+                    order_id,
+                    fill_price=float(observed.payload["fill_price"]),
+                    fill_size=float(observed.payload["fill_size"]),
+                    fill_ts=float(observed.payload["observed_ts"]),
+                    observed_event=observed,
+                )
+            )
         return fills
 
     def _apply_fill(self, *, strategy_family: str, market_id: str, outcome: str, side: str, size: float, price: float) -> float:
@@ -530,6 +844,21 @@ class PolymarketExecutor:
             state = self.pending_resolution.get(slot_id)
             if state is None:
                 state = self._update_pending_resolution(slot_id, now_ts)
+                self._persist_events(
+                    self.settlement_engine.pending_event(
+                        slot_id=slot_id,
+                        market_id=market["id"],
+                        market_slug=market["slug"],
+                        run_id=self.run_id,
+                        sequence_num=self._next_sequence("market_slot", slot_id),
+                        recorded_ts=now_ts,
+                        next_poll_ts=state["next_poll_ts"],
+                        first_pending_ts=state["first_pending_ts"],
+                        delay_seconds=state["delay_seconds"],
+                        deferred=state["deferred"],
+                        correlation_id=slot_id,
+                    )
+                )
                 events.append({
                     "event_type": "market.pending_resolution",
                     "slot_id": slot_id,
@@ -553,6 +882,21 @@ class PolymarketExecutor:
             winning_outcome = self.md.get_winning_outcome(refreshed_market)
             if not refreshed_market.get("closed") or winning_outcome is None:
                 state = self._update_pending_resolution(slot_id, now_ts)
+                self._persist_events(
+                    self.settlement_engine.pending_event(
+                        slot_id=slot_id,
+                        market_id=refreshed_market["id"],
+                        market_slug=refreshed_market["slug"],
+                        run_id=self.run_id,
+                        sequence_num=self._next_sequence("market_slot", slot_id),
+                        recorded_ts=now_ts,
+                        next_poll_ts=state["next_poll_ts"],
+                        first_pending_ts=state["first_pending_ts"],
+                        delay_seconds=state["delay_seconds"],
+                        deferred=state["deferred"],
+                        correlation_id=slot_id,
+                    )
+                )
                 events.append({
                     "event_type": "market.pending_resolution",
                     "slot_id": slot_id,
@@ -565,6 +909,18 @@ class PolymarketExecutor:
 
             self.pending_resolution.pop(slot_id, None)
             events.extend(self._settle_market_positions(refreshed_market, winning_outcome, now_ts))
+            self._persist_events(
+                self.settlement_engine.settled_event(
+                    slot_id=slot_id,
+                    market_id=refreshed_market["id"],
+                    market_slug=refreshed_market["slug"],
+                    winning_outcome=winning_outcome,
+                    settled_ts=now_ts,
+                    run_id=self.run_id,
+                    sequence_num=self._next_sequence("market_slot", slot_id),
+                    correlation_id=slot_id,
+                )
+            )
         return events
 
     def get_family_metrics(self) -> Dict[str, Dict]:
@@ -579,18 +935,65 @@ class PolymarketExecutor:
     def get_realized_pnl_total(self) -> float:
         return self.realized_pnl_total
 
+    def get_ledger_events(self) -> list[LedgerEvent]:
+        if self.ledger is None:
+            return []
+        return self.ledger.list_events(run_id=self.run_id)
+
+    def get_replay_projection(self):
+        if self.ledger is not None:
+            return replay_ledger(self.get_ledger_events())
+        projection = replay_ledger([])
+        projection.orders = {order_id: dict(order) for order_id, order in self.orders.items()}
+        projection.open_orders = {order_id for order_id, order in self.orders.items() if order.get("status") in {"open", "partially_filled", "acknowledged"}}
+        projection.pending_slots = {slot_id: dict(state) for slot_id, state in self.pending_resolution.items()}
+        projection.realized_pnl_total = float(self.realized_pnl_total)
+        projection.resolved_trade_count = int(self.resolved_trade_count)
+        projection.win_count = int(self.win_count)
+        projection.loss_count = int(self.loss_count)
+        projection.latest_settlement = None if self.latest_settlement is None else dict(self.latest_settlement)
+        for key, position in self.positions.items():
+            projection.positions[key] = {
+                "slot_id": None,
+                "market_id": key[1],
+                "outcome": key[2],
+                "strategy_family": key[0],
+                "quantity": float(position.quantity),
+                "average_price": float(position.average_price),
+                "realized_pnl": 0.0,
+            }
+        projection.exposure = {
+            "open_position_count": len([position for position in self.positions.values() if abs(position.quantity) > 1e-9]),
+            "open_order_count": len(projection.open_orders),
+            "gross_position_exposure": 0.0,
+            "gross_open_order_exposure": 0.0,
+            "reserved_buy_order_notional": 0.0,
+            "pending_settlement_exposure": 0.0,
+            "pending_settlement_count": len(projection.pending_slots),
+            "total_gross_exposure": 0.0,
+            "by_strategy_family": {},
+            "by_market_id": {},
+            "by_slot_id": {},
+            "by_asset": {},
+            "by_interval": {},
+        }
+        return projection
+
     def get_runtime_snapshot(self, now_ts: Optional[float] = None) -> Dict:
         now_ts = now_ts or time.time()
+        projection = self.get_replay_projection()
         open_positions = [
             {
                 "strategy_family": family,
                 "market_id": market_id,
                 "outcome": outcome,
-                "quantity": position.quantity,
-                "average_price": position.average_price,
+                "quantity": position.get("quantity", 0.0),
+                "average_price": position.get("average_price", 0.0),
+                "slot_id": position.get("slot_id"),
+                "realized_pnl": position.get("realized_pnl", 0.0),
             }
-            for (family, market_id, outcome), position in self.positions.items()
-            if position.quantity != 0
+            for (family, market_id, outcome), position in projection.positions.items()
+            if abs(float(position.get("quantity", 0.0))) > 1e-9
         ]
         active_slots = [
             {
@@ -607,22 +1010,28 @@ class PolymarketExecutor:
         pending_slots = [
             {
                 "slot_id": slot_id,
-                "market_slug": self.market_registry.get(slot_id, {}).get("slug"),
-                "next_poll_ts": state["next_poll_ts"],
-                "deferred": state["deferred"],
+                "market_slug": self.market_registry.get(slot_id, {}).get("slug") or state.get("market_slug"),
+                "next_poll_ts": state.get("next_poll_ts"),
+                "deferred": bool(state.get("deferred", False)),
             }
-            for slot_id, state in self.pending_resolution.items()
+            for slot_id, state in projection.pending_slots.items()
         ]
+        resolved_trade_count = int(projection.resolved_trade_count)
+        win_count = int(projection.win_count)
+        loss_count = int(projection.loss_count)
         return {
             "open_position_count": len(open_positions),
             "open_positions": open_positions,
-            "resolved_trade_count": self.resolved_trade_count,
-            "win_count": self.win_count,
-            "loss_count": self.loss_count,
-            "win_rate": (self.win_count / self.resolved_trade_count) if self.resolved_trade_count else 0.0,
+            "resolved_trade_count": resolved_trade_count,
+            "win_count": win_count,
+            "loss_count": loss_count,
+            "win_rate": (win_count / resolved_trade_count) if resolved_trade_count else 0.0,
             "active_slots": active_slots,
             "pending_resolution_slots": pending_slots,
-            "latest_settlement": self.latest_settlement,
+            "latest_settlement": projection.latest_settlement or self.latest_settlement,
+            "realized_pnl_total": float(projection.realized_pnl_total),
+            "exposure": projection.exposure,
+            "open_order_count": len(projection.open_orders),
         }
 
     def _get_token_id(self, market_id: str, outcome: str) -> str:
