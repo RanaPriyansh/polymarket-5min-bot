@@ -6,3 +6,8 @@ data/sample_backtest.csv
 logs/
 .env
 .venv/
+.venv/
+__pycache__/
+*.pyc
+data/collection_*.csv
+data/runtime/
