@@ -221,6 +221,27 @@ class RiskReportingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["pending_settlement_exposure"], 1.5)
         self.assertEqual(report["total_gross_exposure"], 7.0)
 
+    async def test_executor_records_risk_snapshot_event(self):
+        fake_md = FakeMarketData(self.market)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = dict(self.config)
+            cfg["execution"] = dict(self.config["execution"])
+            cfg["execution"]["ledger_db_path"] = str(Path(tmpdir) / "ledger.db")
+            executor = PolymarketExecutor(cfg, fake_md, mode="paper", run_id="risk-event")
+            report = {
+                "capital": 500.0,
+                "daily_pnl": 0.0,
+                "max_drawdown": 0.0,
+                "positions": 0,
+                "total_gross_exposure": 0.0,
+            }
+            executor.record_risk_snapshot(report, snapshot_ts=200.0)
+            events = executor.get_ledger_events()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].stream, "risk")
+            self.assertEqual(events[0].event_type, "risk_snapshot_recorded")
+            self.assertEqual(events[0].payload["capital"], 500.0)
+
 
 if __name__ == "__main__":
     unittest.main()

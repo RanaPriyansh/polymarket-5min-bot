@@ -26,7 +26,8 @@
 - Added replay-backed exposure projection in exposure.py and extended replay.py with resolved trade stats, latest settlement, and exposure snapshot derivation.
 - Moved runtime risk reporting off fragile in-memory deltas and onto executor snapshot + ledger event replay inputs.
 - Added restart-stability tests for ledger restore, settlement restore, replay exposure, and replay-derived risk reporting.
-- Full suite now passing at 30 tests.
+- Full suite now passing at 31 tests.
+- Added durable `risk_snapshot_recorded` ledger events from the runtime loop.
 
 ## Key Technical Decisions
 1. **Book Quality Filtering**: Added institutional-grade order book assessment to avoid toxic flows and manipulation

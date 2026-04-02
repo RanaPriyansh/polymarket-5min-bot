@@ -343,6 +343,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         ledger_events=executor.get_ledger_events(),
                         now_ts=snapshot_ts,
                     )
+                    executor.record_risk_snapshot(risk_report, snapshot_ts=snapshot_ts)
                     runtime.write_runtime_snapshot(
                         run_id=run_id,
                         phase="running",

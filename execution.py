@@ -337,6 +337,29 @@ class PolymarketExecutor:
             },
         )
 
+    def _risk_snapshot_event(self, risk_report: Dict, *, snapshot_ts: float) -> LedgerEvent:
+        return LedgerEvent(
+            event_id=f"evt-{uuid.uuid4().hex}",
+            stream="risk",
+            aggregate_id=self.run_id,
+            sequence_num=self._next_sequence("risk", self.run_id),
+            event_type="risk_snapshot_recorded",
+            event_ts=float(snapshot_ts),
+            recorded_ts=float(snapshot_ts),
+            run_id=self.run_id,
+            idempotency_key=f"risk:{self.run_id}:{self.fill_engine._format_decimal(snapshot_ts)}",
+            causation_id=None,
+            correlation_id=self.run_id,
+            schema_version=1,
+            payload=dict(risk_report),
+        )
+
+    def record_risk_snapshot(self, risk_report: Dict, *, snapshot_ts: float | None = None) -> None:
+        if self.ledger is None:
+            return
+        ts = float(snapshot_ts if snapshot_ts is not None else time.time())
+        self._persist_events(self._risk_snapshot_event(risk_report, snapshot_ts=ts))
+
     def _ensure_family_metrics(self, strategy_family: str) -> Dict:
         metrics = self.family_metrics.setdefault(
             strategy_family,

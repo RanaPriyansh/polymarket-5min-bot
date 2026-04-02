@@ -17,6 +17,7 @@ Completed in this slice
   - `get_ledger_events()`
   - `get_replay_projection()`
   - replay-derived runtime snapshot fields
+  - `record_risk_snapshot()` for durable `risk_snapshot_recorded` ledger events
 - Reworked `risk.py` so reporting can be built from executor snapshot + ledger events.
 - Removed CLI dependence on incremental realized-delta bankroll mutation.
 - Added tests:
@@ -24,10 +25,11 @@ Completed in this slice
   - replay-derived risk report stability after restart
   - replay-derived circuit breaker trigger
   - runtime snapshot resolved stats restored after settlement replay
+  - risk snapshot event emission
 
 Verification
 - Targeted suite: passed
-- Full suite: `pytest -q` -> `30 passed`
+- Full suite: `pytest -q` -> `31 passed`
 
 Strategic meaning
 - Runtime no longer just stores fills and settlements; it now reads them back into exposure and risk reporting.
