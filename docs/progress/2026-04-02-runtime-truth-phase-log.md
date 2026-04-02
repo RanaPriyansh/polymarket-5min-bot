@@ -38,8 +38,16 @@ Strategic meaning
 Still missing
 - Mark-to-market drawdown/exposure using live marks rather than only realized PnL.
 - Replay-derived family metrics.
-- Explicit `risk_snapshot_recorded` event emission into ledger.
 - Full CLI-level restart equivalence harness.
+
+Deployment status
+- `polymarket-paper-bot.service` is now running live under systemd from the canonical repo path.
+- Service unit was cleaned to a single authoritative `ExecStart` with explicit `--runtime-dir`.
+- Live runtime verification confirmed:
+  - 8 strict interval markets discovered
+  - ledger writes occurring in `data/runtime/ledger.db`
+  - `risk_snapshot_recorded` events present for active run ids
+  - `status.json` heartbeat updating under systemd
 
 Recommended next move
 1. Emit `risk_snapshot_recorded` each loop.

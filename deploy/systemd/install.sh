@@ -1,79 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# install.sh — install polymarket-paper-bot systemd unit
-# Usage: sudo bash deploy/systemd/install.sh
-#
-# ROLLBACK:
-#   sudo systemctl stop polymarket-paper-bot
-#   sudo systemctl disable polymarket-paper-bot
-#   sudo cp /etc/systemd/system/polymarket-paper-bot.service.bak \
-#      /etc/systemd/system/polymarket-paper-bot.service
-#   sudo cp /etc/systemd/system/polymarket-paper-bot.service.bak /etc/systemd/system/polymarket-paper-bot.service
-#   sudo systemctl daemon-reload
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SERVICE_FILE="$REPO_ROOT/deploy/systemd/polymarket-paper-bot.service"
-SYSTEMD_DIR="/etc/systemd/system"
-TARGET="$SYSTEMD_DIR/polymarket-paper-bot.service"
+TARGET="/etc/systemd/system/polymarket-paper-bot.service"
+BOT_NAME="polymarket-paper-bot"
 
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Error: run as root (sudo $0)" >&2
-    exit 1
+  echo "ERROR: run as root (sudo bash deploy/systemd/install.sh)" >&2
+  exit 1
 fi
 
 if [ ! -f "$SERVICE_FILE" ]; then
-    echo "Error: service file not found at $SERVICE_FILE" >&2
-    exit 1
+  echo "ERROR: service file not found at $SERVICE_FILE" >&2
+  exit 1
 fi
 
-echo "=== Polymarket Paper Bot — systemd install ==="
-echo "Source:      $SERVICE_FILE"
-echo "Destination: $TARGET"
-echo ""
-echo "Installing polymarket-paper-bot.service ..."
+mkdir -p "$REPO_ROOT/data/runtime" "$REPO_ROOT/data/research"
 
-# Backup existing unit if present
+if [ ! -x "$REPO_ROOT/.venv/bin/python" ]; then
+  echo "ERROR: missing virtualenv python at $REPO_ROOT/.venv/bin/python" >&2
+  exit 1
+fi
+
 if [ -f "$TARGET" ]; then
-    cp "$TARGET" "$TARGET.bak"
-    echo "Backed up existing unit -> $TARGET.bak"
+  cp "$TARGET" "$TARGET.bak"
+  echo "Backed up existing unit to $TARGET.bak"
 fi
 
-# Install
-cp "$SERVICE_FILE" "$TARGET"
-chmod 644 "$TARGET"
-echo "Installed unit file."
-
-# Activate
 cp "$SERVICE_FILE" "$TARGET"
 chmod 644 "$TARGET"
 
 systemctl daemon-reload
-systemctl enable polymarket-paper-bot
-systemctl restart polymarket-paper-bot
+systemctl enable "$BOT_NAME"
+systemctl restart "$BOT_NAME"
 
-echo ""
-echo "=== Service status ==="
-systemctl status polymarket-paper-bot --no-pager
+echo
+echo "=== systemd status ==="
+systemctl status "$BOT_NAME" --no-pager
 
-echo ""
-echo "=== Recent logs ==="
-journalctl -u polymarket-paper-bot --no-pager -n 30
+echo
+echo "=== ExecStart verification ==="
+systemctl show "$BOT_NAME" -p ExecStart -p WorkingDirectory --no-pager
 
-echo ""
-echo "Status:  systemctl status polymarket-paper-bot"
-echo "Follow:  journalctl -u polymarket-paper-bot -f"
-echo "Stop:    sudo systemctl stop polymarket-paper-bot"
-echo ""
-echo "Rollback:"
-echo "  sudo cp $TARGET.bak $TARGET"
-echo "  sudo systemctl daemon-reload"
-echo "  sudo systemctl restart polymarket-paper-bot"
-journalctl -u polymarket-paper-bot --no-pager -n 20
+echo
+echo "=== recent logs ==="
+journalctl -u "$BOT_NAME" -n 30 --no-pager
 
-echo ""
-echo "Status:     systemctl status polymarket-paper-bot"
-echo "Logs:       journalctl -u polymarket-paper-bot -f"
-echo "Stop:       sudo systemctl stop polymarket-paper-bot"
-echo "Rollback:   sudo cp $TARGET.bak $TARGET && sudo systemctl daemon-reload && sudo systemctl restart polymarket-paper-bot"
+echo
+echo "Follow logs: journalctl -u $BOT_NAME -f"
+echo "Rollback: cp $TARGET.bak $TARGET && systemctl daemon-reload && systemctl restart $BOT_NAME"
