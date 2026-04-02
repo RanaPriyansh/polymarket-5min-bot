@@ -4,7 +4,8 @@ from collections import defaultdict
 from typing import Any
 
 
-def build_exposure_snapshot(projection) -> dict[str, Any]:
+def build_exposure_snapshot(projection, marks_by_position: dict[tuple[str, str, str], dict[str, Any]] | None = None) -> dict[str, Any]:
+    marks_by_position = marks_by_position or {}
     by_strategy: dict[str, dict[str, float]] = defaultdict(lambda: _bucket())
     by_market: dict[str, dict[str, float]] = defaultdict(lambda: _bucket())
     by_slot: dict[str, dict[str, float]] = defaultdict(lambda: _bucket())
@@ -17,8 +18,11 @@ def build_exposure_snapshot(projection) -> dict[str, Any]:
     pending_settlement_exposure = 0.0
     open_position_count = 0
     pending_settlement_count = len(projection.pending_slots)
+    unrealized_pnl_total = 0.0
+    marked_position_count = 0
+    unmarked_position_count = 0
 
-    for position in projection.positions.values():
+    for key, position in projection.positions.items():
         quantity = float(position.get("quantity", 0.0))
         if abs(quantity) <= 1e-9:
             continue
@@ -40,6 +44,24 @@ def build_exposure_snapshot(projection) -> dict[str, Any]:
                 by_interval[interval]["position_exposure"] += exposure
             if slot_id in projection.pending_slots:
                 pending_settlement_exposure += exposure
+
+        mark = marks_by_position.get(key)
+        if mark and mark.get("mark_price") is not None:
+            marked_position_count += 1
+            unrealized = float(mark.get("unrealized_pnl", 0.0))
+            unrealized_pnl_total += unrealized
+            by_strategy[strategy]["unrealized_pnl"] += unrealized
+            if market_id:
+                by_market[market_id]["unrealized_pnl"] += unrealized
+            if slot_id:
+                by_slot[slot_id]["unrealized_pnl"] += unrealized
+                asset, interval = _parse_slot_id(slot_id)
+                if asset:
+                    by_asset[asset]["unrealized_pnl"] += unrealized
+                if interval:
+                    by_interval[interval]["unrealized_pnl"] += unrealized
+        else:
+            unmarked_position_count += 1
 
     for order_id in projection.open_orders:
         order = projection.orders.get(order_id)
@@ -76,6 +98,9 @@ def build_exposure_snapshot(projection) -> dict[str, Any]:
         "pending_settlement_exposure": round(pending_settlement_exposure, 6),
         "pending_settlement_count": pending_settlement_count,
         "total_gross_exposure": round(gross_position_exposure + gross_open_order_exposure, 6),
+        "unrealized_pnl_total": round(unrealized_pnl_total, 6),
+        "marked_position_count": marked_position_count,
+        "unmarked_position_count": unmarked_position_count,
         "by_strategy_family": _finalize(by_strategy),
         "by_market_id": _finalize(by_market),
         "by_slot_id": _finalize(by_slot),
@@ -102,7 +127,12 @@ def _parse_slot_id(slot_id: str | None) -> tuple[str | None, str | None]:
 
 
 def _bucket() -> dict[str, float]:
-    return {"position_exposure": 0.0, "open_order_exposure": 0.0, "total_exposure": 0.0}
+    return {
+        "position_exposure": 0.0,
+        "open_order_exposure": 0.0,
+        "unrealized_pnl": 0.0,
+        "total_exposure": 0.0,
+    }
 
 
 def _finalize(values: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
@@ -112,6 +142,7 @@ def _finalize(values: dict[str, dict[str, float]]) -> dict[str, dict[str, float]
         finalized[key] = {
             "position_exposure": round(float(bucket["position_exposure"]), 6),
             "open_order_exposure": round(float(bucket["open_order_exposure"]), 6),
+            "unrealized_pnl": round(float(bucket.get("unrealized_pnl", 0.0)), 6),
             "total_exposure": round(total, 6),
         }
     return finalized

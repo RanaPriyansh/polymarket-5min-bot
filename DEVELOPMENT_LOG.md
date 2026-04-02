@@ -30,6 +30,7 @@
 - Added durable `risk_snapshot_recorded` ledger events from the runtime loop.
 - Cleaned and reinstalled the systemd service so live paper trading now runs from a single authoritative ExecStart with explicit runtime dir.
 - Added `cli.py status` / `cli.py health` plus `latest-status.txt` for fast operational inspection from terminal or systemd hooks.
+- Added live mark-to-market runtime risk: unrealized PnL, marked/unmarked position counts, and mark-aware capital/drawdown from current loop orderbooks.
 
 ## Key Technical Decisions
 1. **Book Quality Filtering**: Added institutional-grade order book assessment to avoid toxic flows and manipulation

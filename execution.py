@@ -20,6 +20,7 @@ from ledger import LedgerEvent, SQLiteLedger
 from paper_exchange import ConservativeFillEngine, FillPolicy, OrderBookSnapshot
 from replay import replay_ledger
 from settlement_engine import SettlementEngine
+from exposure import build_exposure_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -1053,22 +1054,99 @@ class PolymarketExecutor:
         }
         return projection
 
-    def get_runtime_snapshot(self, now_ts: Optional[float] = None) -> Dict:
+    def _position_mark_payload(self, position: Dict, orderbook) -> Dict:
+        quantity = float(position.get("quantity", 0.0))
+        average_price = float(position.get("average_price", 0.0))
+        outcome = position.get("outcome")
+        if abs(quantity) <= 1e-9 or orderbook is None:
+            return {
+                "mark_price": None,
+                "mark_source": "unavailable",
+                "mark_ts": None,
+                "unrealized_pnl": 0.0,
+            }
+
+        if quantity > 0:
+            direct = float(self.md.best_bid(orderbook, outcome))
+            if direct > 0:
+                return {
+                    "mark_price": direct,
+                    "mark_source": "best_bid",
+                    "mark_ts": float(orderbook.timestamp),
+                    "unrealized_pnl": round(quantity * (direct - average_price), 6),
+                }
+        else:
+            direct = float(self.md.best_ask(orderbook, outcome))
+            if direct > 0:
+                return {
+                    "mark_price": direct,
+                    "mark_source": "best_ask",
+                    "mark_ts": float(orderbook.timestamp),
+                    "unrealized_pnl": round(quantity * (direct - average_price), 6),
+                }
+
+        labels = getattr(orderbook, "outcome_labels", ("YES", "NO"))
+        alt_outcome = labels[1] if outcome == labels[0] else labels[0]
+        if quantity > 0:
+            alt_ask = float(self.md.best_ask(orderbook, alt_outcome))
+            if alt_ask > 0:
+                mark_price = max(0.0, min(1.0, 1.0 - alt_ask))
+                return {
+                    "mark_price": mark_price,
+                    "mark_source": "complement_ask",
+                    "mark_ts": float(orderbook.timestamp),
+                    "unrealized_pnl": round(quantity * (mark_price - average_price), 6),
+                }
+        else:
+            alt_bid = float(self.md.best_bid(orderbook, alt_outcome))
+            if alt_bid > 0:
+                mark_price = max(0.0, min(1.0, 1.0 - alt_bid))
+                return {
+                    "mark_price": mark_price,
+                    "mark_source": "complement_bid",
+                    "mark_ts": float(orderbook.timestamp),
+                    "unrealized_pnl": round(quantity * (mark_price - average_price), 6),
+                }
+
+        mid = float(self.md.mid_price(orderbook, outcome))
+        if mid > 0:
+            return {
+                "mark_price": mid,
+                "mark_source": "mid_price",
+                "mark_ts": float(orderbook.timestamp),
+                "unrealized_pnl": round(quantity * (mid - average_price), 6),
+            }
+
+        return {
+            "mark_price": None,
+            "mark_source": "unavailable",
+            "mark_ts": None,
+            "unrealized_pnl": 0.0,
+        }
+
+    def get_runtime_snapshot(self, now_ts: Optional[float] = None, orderbooks_by_market: Optional[Dict[str, object]] = None) -> Dict:
         now_ts = now_ts or time.time()
         projection = self.get_replay_projection()
-        open_positions = [
-            {
-                "strategy_family": family,
-                "market_id": market_id,
-                "outcome": outcome,
-                "quantity": position.get("quantity", 0.0),
-                "average_price": position.get("average_price", 0.0),
-                "slot_id": position.get("slot_id"),
-                "realized_pnl": position.get("realized_pnl", 0.0),
-            }
-            for (family, market_id, outcome), position in projection.positions.items()
-            if abs(float(position.get("quantity", 0.0))) > 1e-9
-        ]
+        orderbooks_by_market = orderbooks_by_market or {}
+        marks_by_position: Dict[Tuple[str, str, str], Dict] = {}
+        open_positions = []
+        for (family, market_id, outcome), position in projection.positions.items():
+            if abs(float(position.get("quantity", 0.0))) <= 1e-9:
+                continue
+            mark_payload = self._position_mark_payload(position, orderbooks_by_market.get(market_id))
+            marks_by_position[(family, market_id, outcome)] = mark_payload
+            open_positions.append(
+                {
+                    "strategy_family": family,
+                    "market_id": market_id,
+                    "outcome": outcome,
+                    "quantity": position.get("quantity", 0.0),
+                    "average_price": position.get("average_price", 0.0),
+                    "slot_id": position.get("slot_id"),
+                    "realized_pnl": position.get("realized_pnl", 0.0),
+                    **mark_payload,
+                }
+            )
         active_slots = [
             {
                 "slot_id": market["slot_id"],
@@ -1081,6 +1159,7 @@ class PolymarketExecutor:
             for market in self.market_registry.values()
             if market["end_ts"] > now_ts
         ]
+        projection.exposure = build_exposure_snapshot(projection, marks_by_position=marks_by_position)
         pending_slots = [
             {
                 "slot_id": slot_id,
@@ -1104,6 +1183,9 @@ class PolymarketExecutor:
             "pending_resolution_slots": pending_slots,
             "latest_settlement": projection.latest_settlement or self.latest_settlement,
             "realized_pnl_total": float(projection.realized_pnl_total),
+            "unrealized_pnl_total": float(projection.exposure.get("unrealized_pnl_total", 0.0)),
+            "marked_position_count": int(projection.exposure.get("marked_position_count", 0)),
+            "unmarked_position_count": int(projection.exposure.get("unmarked_position_count", 0)),
             "exposure": projection.exposure,
             "open_order_count": len(projection.open_orders),
         }

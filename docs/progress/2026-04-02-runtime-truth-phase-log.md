@@ -36,9 +36,9 @@ Strategic meaning
 - The paper bot is materially closer to a truth spine instead of a vibes engine.
 
 Still missing
-- Mark-to-market drawdown/exposure using live marks rather than only realized PnL.
-- Replay-derived family metrics.
+- Replay-derived family metrics are still partial for markets_seen / toxic skips.
 - Full CLI-level restart equivalence harness.
+- Dedicated persisted mark-history contract if we want historical MTM analytics beyond per-loop risk snapshots.
 
 Deployment status
 - `polymarket-paper-bot.service` is now running live under systemd from the canonical repo path.

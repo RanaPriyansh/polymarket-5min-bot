@@ -116,43 +116,41 @@ class RiskManager:
 
         now_ts = float(now_ts if now_ts is not None else 0.0)
         realized_total = float(executor_snapshot.get("realized_pnl_total", 0.0))
-        capital = float(self.initial_capital + realized_total)
+        unrealized_total = float(executor_snapshot.get("unrealized_pnl_total", 0.0) or executor_snapshot.get("exposure", {}).get("unrealized_pnl_total", 0.0))
+        realized_capital = float(self.initial_capital + realized_total)
+        capital = float(realized_capital + unrealized_total)
         daily_pnl = realized_total
         if ledger_events and now_ts > 0:
             day_start_ts = now_ts - (now_ts % 86400)
             day_end_ts = day_start_ts + 86400
             daily_pnl = float(realized_pnl_for_day(ledger_events, day_start_ts=day_start_ts, day_end_ts=day_end_ts))
 
-        peak = float(self.initial_capital)
+        peak = float(max(self.initial_capital, capital))
         max_drawdown = 0.0
         if ledger_events:
-            running_realized = 0.0
             for event in ledger_events:
-                event_type = getattr(event, "event_type", None)
+                if getattr(event, "stream", None) != "risk":
+                    continue
+                if getattr(event, "event_type", None) != "risk_snapshot_recorded":
+                    continue
                 payload = getattr(event, "payload", {}) or {}
-                delta = 0.0
-                if event_type == "slot_settled":
-                    before_snapshot = self.initial_capital + running_realized
-                    # settlement realized path is not explicitly stored; peak/drawdown remain realized-total conservative
-                    peak = max(peak, before_snapshot)
-                if event_type == "fill_applied":
-                    delta = 0.0
-                running_realized += delta
-                peak = max(peak, self.initial_capital + running_realized)
-            capital_for_dd = capital
-            max_drawdown = max(0.0, (peak - capital_for_dd) / peak) if peak > 0 else 0.0
-        else:
-            peak = max(self.initial_capital, capital)
-            max_drawdown = max(0.0, (peak - capital) / peak) if peak > 0 else 0.0
+                historical_capital = float(payload.get("capital", payload.get("mark_to_market_capital", self.initial_capital)))
+                peak = max(peak, historical_capital)
+        max_drawdown = max(0.0, (peak - capital) / peak) if peak > 0 else 0.0
 
         exposure = executor_snapshot.get("exposure", {}) or {}
         return {
             "capital": round(capital, 6),
+            "realized_capital": round(realized_capital, 6),
+            "mark_to_market_capital": round(capital, 6),
             "peak": round(max(peak, capital), 6),
             "daily_pnl": round(daily_pnl, 6),
             "max_drawdown": round(max_drawdown, 6),
             "positions": int(executor_snapshot.get("open_position_count", 0)),
             "realized_pnl_total": round(realized_total, 6),
+            "unrealized_pnl_total": round(unrealized_total, 6),
+            "marked_position_count": int(exposure.get("marked_position_count", 0)),
+            "unmarked_position_count": int(exposure.get("unmarked_position_count", 0)),
             "open_order_count": int(executor_snapshot.get("open_order_count", 0)),
             "gross_position_exposure": round(float(exposure.get("gross_position_exposure", 0.0)), 6),
             "gross_open_order_exposure": round(float(exposure.get("gross_open_order_exposure", 0.0)), 6),

@@ -48,8 +48,9 @@ def render_status_text(runtime_dir: str | Path) -> str:
         f"Phase: {status.get('phase', 'unknown')} | Mode: {status.get('mode', 'unknown')} | Loop: {status.get('loop_count', 0)}",
         f"Heartbeat age: {heartbeat_text}",
         f"Markets: fetched={status.get('fetched_markets', 0)} processed={status.get('processed_markets', 0)} toxic_skips={status.get('toxic_skips', 0)}",
-        f"Capital: ${float(risk.get('capital', status.get('bankroll', 0.0))):.2f} | Daily PnL: {float(risk.get('daily_pnl', 0.0)):.4f} | Drawdown: {float(risk.get('max_drawdown', 0.0)):.2%}",
+        f"Capital: ${float(risk.get('capital', status.get('bankroll', 0.0))):.2f} | Realized: {float(risk.get('realized_pnl_total', 0.0)):.4f} | Unrealized: {float(risk.get('unrealized_pnl_total', 0.0)):.4f} | Drawdown: {float(risk.get('max_drawdown', 0.0)):.2%}",
         f"Open positions: {status.get('open_position_count', 0)} | Open orders: {int(risk.get('open_order_count', status.get('open_order_count', 0)))} | Pending settlements: {len(status.get('pending_resolution_slots', []))}",
+        f"Marks: marked={int(risk.get('marked_position_count', 0))} unmarked={int(risk.get('unmarked_position_count', 0))}",
         f"Exposure: gross={float(risk.get('total_gross_exposure', 0.0)):.4f} position={float(risk.get('gross_position_exposure', 0.0)):.4f} open_orders={float(risk.get('gross_open_order_exposure', 0.0)):.4f}",
         f"Resolved: {status.get('resolved_trade_count', 0)} | Win rate: {float(status.get('win_rate', 0.0)):.2%}",
     ]

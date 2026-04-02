@@ -197,6 +197,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                     processed_markets = 0
                     toxic_skips = 0
                     fill_events: List[Dict] = []
+                    orderbooks_by_market: Dict[str, object] = {}
 
                     for idx, market in enumerate(all_markets):
                         market_id = market["id"]
@@ -208,6 +209,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                             continue
 
                         orderbook = ob_or_exc
+                        orderbooks_by_market[market_id] = orderbook
                         book_quality = assess_book_quality(
                             orderbook,
                             primary_outcome,
@@ -338,7 +340,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                     runtime.write_strategy_metrics(strategy_metrics)
 
                     snapshot_ts = time.time()
-                    executor_snapshot = executor.get_runtime_snapshot(now_ts=snapshot_ts)
+                    executor_snapshot = executor.get_runtime_snapshot(now_ts=snapshot_ts, orderbooks_by_market=orderbooks_by_market)
                     risk_report = risk_mgr.get_risk_report(
                         executor_snapshot=executor_snapshot,
                         ledger_events=executor.get_ledger_events(),
