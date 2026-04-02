@@ -947,13 +947,64 @@ class PolymarketExecutor:
         return events
 
     def get_family_metrics(self) -> Dict[str, Dict]:
-        return {
-            family: {
-                **metrics,
-                "realized_pnl": round(metrics["realized_pnl"], 6),
+        if self.ledger is None:
+            return {
+                family: {
+                    **metrics,
+                    "realized_pnl": round(metrics["realized_pnl"], 6),
+                }
+                for family, metrics in self.family_metrics.items()
             }
-            for family, metrics in self.family_metrics.items()
+        return self.get_replay_family_metrics()
+
+    def get_replay_family_metrics(self) -> Dict[str, Dict]:
+        metrics: Dict[str, Dict] = {
+            family: {
+                **values,
+                "realized_pnl": round(values["realized_pnl"], 6),
+            }
+            for family, values in self.family_metrics.items()
         }
+        projection = self.get_replay_projection()
+        for order in projection.orders.values():
+            family = order.get("strategy_family", "unknown")
+            entry = metrics.setdefault(
+                family,
+                {
+                    "quotes_submitted": 0,
+                    "orders_resting": 0,
+                    "orders_filled": 0,
+                    "cancellations": 0,
+                    "realized_pnl": 0.0,
+                    "markets_seen": 0,
+                    "toxic_book_skips": 0,
+                },
+            )
+            if order.get("order_kind") == "quote":
+                entry["quotes_submitted"] += 1
+            if order.get("status") in {"open", "partially_filled", "acknowledged"}:
+                entry["orders_resting"] += 1
+            if order.get("status") == "filled":
+                entry["orders_filled"] += 1
+            if order.get("status") == "cancelled":
+                entry["cancellations"] += 1
+        family_realized: Dict[str, float] = {}
+        for (family, _market_id, _outcome), position in projection.positions.items():
+            family_realized[family] = family_realized.get(family, 0.0) + float(position.get("realized_pnl", 0.0))
+        for family, realized in family_realized.items():
+            metrics.setdefault(
+                family,
+                {
+                    "quotes_submitted": 0,
+                    "orders_resting": 0,
+                    "orders_filled": 0,
+                    "cancellations": 0,
+                    "realized_pnl": 0.0,
+                    "markets_seen": 0,
+                    "toxic_book_skips": 0,
+                },
+            )["realized_pnl"] = round(realized, 6)
+        return metrics
 
     def get_realized_pnl_total(self) -> float:
         return self.realized_pnl_total

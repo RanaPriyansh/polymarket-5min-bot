@@ -18,6 +18,7 @@ import yaml
 from research.loop import ResearchLoop
 from research.polymarket import PolymarketRuntimeResearchAdapter
 from runtime_telemetry import RuntimeTelemetry
+from status_utils import render_status_text, runtime_health_payload
 
 logging.basicConfig(
     level=logging.INFO,
@@ -484,6 +485,25 @@ def collect():
                 click.echo(f"Saved {len(records)} records to {fname}")
 
     asyncio.run(collect_loop())
+
+
+@cli.command()
+@click.option("--runtime-dir", default="data/runtime", help="Directory containing live runtime artifacts")
+def status(runtime_dir):
+    """Render the current replay-backed runtime status."""
+    click.echo(render_status_text(runtime_dir))
+
+
+@cli.command(name="health")
+@click.option("--runtime-dir", default="data/runtime", help="Directory containing live runtime artifacts")
+@click.option("--max-heartbeat-age", default=180, help="Max acceptable heartbeat age in seconds")
+def health_cmd(runtime_dir, max_heartbeat_age):
+    """Check runtime health from durable heartbeat artifacts."""
+    payload = runtime_health_payload(runtime_dir, max_heartbeat_age=max_heartbeat_age)
+    click.echo(render_status_text(runtime_dir))
+    click.echo(f"Healthy: {payload['healthy']} (threshold={max_heartbeat_age}s)")
+    if not payload["healthy"]:
+        raise SystemExit(1)
 
 
 @cli.command()

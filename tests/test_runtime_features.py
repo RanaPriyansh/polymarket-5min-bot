@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from pathlib import Path
 
 from book_quality import assess_book_quality
 from execution import PolymarketExecutor
@@ -8,6 +9,7 @@ from market_data import OrderBook
 from research.loop import ResearchLoop
 from research.polymarket import PolymarketRuntimeResearchAdapter
 from runtime_telemetry import RuntimeTelemetry
+from status_utils import render_status_text, runtime_health_payload
 
 
 class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
@@ -88,6 +90,50 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
             with open(report_path, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
             self.assertEqual(payload["source"], "live-runtime-artifacts")
+
+    async def test_status_utils_render_runtime_summary_and_health(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            telemetry = RuntimeTelemetry(tmpdir)
+            telemetry.write_strategy_metrics({
+                "toxicity_mm": {
+                    "quotes_submitted": 4,
+                    "orders_resting": 2,
+                    "orders_filled": 1,
+                    "cancellations": 1,
+                    "realized_pnl": 0.5,
+                    "markets_seen": 8,
+                    "toxic_book_skips": 3,
+                }
+            })
+            telemetry.update_status(
+                run_id="paper-test",
+                phase="running",
+                mode="paper",
+                loop_count=7,
+                fetched_markets=8,
+                processed_markets=5,
+                toxic_skips=3,
+                bankroll=500.0,
+                open_position_count=1,
+                resolved_trade_count=2,
+                win_rate=0.5,
+                risk={
+                    "capital": 501.25,
+                    "daily_pnl": 1.25,
+                    "max_drawdown": 0.02,
+                    "open_order_count": 2,
+                    "gross_position_exposure": 4.0,
+                    "gross_open_order_exposure": 3.0,
+                    "total_gross_exposure": 7.0,
+                },
+            )
+            rendered = render_status_text(tmpdir)
+            self.assertIn("Run id: paper-test", rendered)
+            self.assertIn("Strategy metrics:", rendered)
+            self.assertIn("toxicity_mm", rendered)
+            self.assertTrue(Path(tmpdir, "latest-status.txt").exists())
+            health = runtime_health_payload(tmpdir, max_heartbeat_age=180)
+            self.assertTrue(health["healthy"])
 
 
 if __name__ == "__main__":

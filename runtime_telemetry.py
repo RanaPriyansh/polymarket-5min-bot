@@ -15,6 +15,7 @@ class RuntimeTelemetry:
         self.events_path = self.runtime_dir / "events.jsonl"
         self.strategy_metrics_path = self.runtime_dir / "strategy_metrics.json"
         self.market_samples_path = self.runtime_dir / "market_samples.jsonl"
+        self.latest_status_text_path = self.runtime_dir / "latest-status.txt"
 
     @staticmethod
     def make_run_id(prefix: str = "paper") -> str:
@@ -42,6 +43,7 @@ class RuntimeTelemetry:
         current.update(fields)
         current["heartbeat_ts"] = time.time()
         self.status_path.write_text(json.dumps(current, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        self.latest_status_text_path.write_text(self._render_latest_status_text(current), encoding="utf-8")
         return current
 
     def write_strategy_metrics(self, metrics: Dict) -> None:
@@ -74,3 +76,14 @@ class RuntimeTelemetry:
 
     def read_market_samples(self, limit: Optional[int] = None):
         return list(self.read_jsonl(self.market_samples_path, limit=limit))
+
+    @staticmethod
+    def _render_latest_status_text(status: Dict) -> str:
+        risk = status.get("risk", {}) or {}
+        return (
+            f"run_id={status.get('run_id', 'unknown')}\n"
+            f"phase={status.get('phase', 'unknown')} mode={status.get('mode', 'unknown')} loop_count={status.get('loop_count', 0)}\n"
+            f"bankroll={float(risk.get('capital', status.get('bankroll', 0.0))):.2f}\n"
+            f"open_position_count={status.get('open_position_count', 0)} resolved_trade_count={status.get('resolved_trade_count', 0)}\n"
+            f"heartbeat_ts={status.get('heartbeat_ts', 0)}\n"
+        )

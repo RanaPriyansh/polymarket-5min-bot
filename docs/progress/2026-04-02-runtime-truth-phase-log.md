@@ -43,6 +43,10 @@ Still missing
 Deployment status
 - `polymarket-paper-bot.service` is now running live under systemd from the canonical repo path.
 - Service unit was cleaned to a single authoritative `ExecStart` with explicit `--runtime-dir`.
+- Added CLI ops surfaces:
+  - `python3 cli.py status --runtime-dir data/runtime`
+  - `python3 cli.py health --runtime-dir data/runtime --max-heartbeat-age 180`
+- Added `latest-status.txt` emission beside `status.json` for fast terminal/systemd inspection.
 - Live runtime verification confirmed:
   - 8 strict interval markets discovered
   - ledger writes occurring in `data/runtime/ledger.db`
