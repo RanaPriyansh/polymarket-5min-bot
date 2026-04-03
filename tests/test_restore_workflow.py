@@ -370,8 +370,8 @@ class RestoreWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await executor.__aexit__(None, None, None)
 
             restored_pending = PolymarketExecutor(cfg, fake_md, mode="paper", run_id="run-settle")
-            restored_pending.register_market(self.market)
             self.assertIn(self.market["slot_id"], restored_pending.pending_resolution)
+            self.assertIn(self.market["slot_id"], restored_pending.market_registry)
             self.assertEqual(restored_pending.get_runtime_snapshot(now_ts=132.0)["open_position_count"], 1)
 
             fake_md.resolved_market.update({"closed": True, "outcome_prices": [1.0, 0.0]})
@@ -379,7 +379,6 @@ class RestoreWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(event["event_type"] == "market.settled" for event in settlement_events))
 
             restored_final = PolymarketExecutor(cfg, fake_md, mode="paper", run_id="run-settle")
-            restored_final.register_market(self.market)
             snapshot = restored_final.get_runtime_snapshot(now_ts=151.0)
             self.assertEqual(snapshot["open_position_count"], 0)
             self.assertEqual(snapshot["pending_resolution_slots"], [])

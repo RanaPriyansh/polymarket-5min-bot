@@ -159,6 +159,8 @@ class PolymarketExecutor:
         self.pending_resolution = {
             slot_id: {
                 "slot_id": slot_id,
+                "market_id": payload.get("market_id"),
+                "market_slug": payload.get("market_slug"),
                 "first_pending_ts": payload.get("first_pending_ts", payload.get("next_poll_ts", 0.0)),
                 "next_poll_ts": payload.get("next_poll_ts", 0.0),
                 "delay_seconds": payload.get("delay_seconds", self.resolution_initial_poll_seconds),
@@ -187,7 +189,25 @@ class PolymarketExecutor:
                 "slot_id": slot_id,
                 **payload,
             }
+        self._restore_market_registry_from_state()
         self._rebuild_signal_slots_from_orders()
+
+    def _restore_market_registry_from_state(self) -> None:
+        for order in self.orders.values():
+            slot_id = order.get("slot_id")
+            market_id = order.get("market_id")
+            if not slot_id or not market_id:
+                continue
+            market = self.market_registry.setdefault(slot_id, {"slot_id": slot_id, "id": market_id})
+            market.setdefault("slug", order.get("market_slug"))
+            market.setdefault("end_ts", float(order.get("market_end_ts", 0.0) or 0.0))
+        for slot_id, state in self.pending_resolution.items():
+            market_id = state.get("market_id")
+            if not slot_id or not market_id:
+                continue
+            market = self.market_registry.setdefault(slot_id, {"slot_id": slot_id, "id": market_id})
+            if state.get("market_slug"):
+                market.setdefault("slug", state.get("market_slug"))
 
     def _rebuild_signal_slots_from_orders(self) -> None:
         self.signal_slots = {}
@@ -856,8 +876,23 @@ class PolymarketExecutor:
     async def process_pending_resolutions(self, now_ts: Optional[float] = None) -> List[Dict]:
         now_ts = now_ts or time.time()
         events: List[Dict] = []
-        for slot_id, market in list(self.market_registry.items()):
-            if market["end_ts"] > now_ts:
+        slot_ids = set(self.market_registry.keys()) | set(self.pending_resolution.keys())
+        for slot_id in sorted(slot_ids):
+            market = self.market_registry.get(slot_id)
+            if market is None:
+                state = self.pending_resolution.get(slot_id, {})
+                market_id = state.get("market_id")
+                market_slug = state.get("market_slug")
+                if not market_id or not market_slug:
+                    continue
+                market = {
+                    "slot_id": slot_id,
+                    "id": market_id,
+                    "slug": market_slug,
+                    "end_ts": 0.0,
+                }
+                self.market_registry[slot_id] = market
+            if float(market.get("end_ts", 0.0)) > now_ts and slot_id not in self.pending_resolution:
                 continue
 
             await self.cancel_market_orders(market["id"])
