@@ -1,9 +1,12 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
 from backtest_engine import Backtester
 from execution import PolymarketExecutor
+from ledger import SQLiteLedger
 from market_data import OrderBook, PolymarketData
 from strategies.mean_reversion_5min import MeanReversion5Min
 from strategies.mean_reversion_5min import Signal
@@ -292,6 +295,103 @@ class RestoreWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(executor.has_strategy_market_exposure("mean_reversion_5min", "m1"))
         finally:
             await executor.__aexit__(None, None, None)
+
+    async def test_executor_restores_orders_and_positions_from_ledger(self):
+        fake_md = FakeMarketData(self.market)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = dict(self.config)
+            cfg["execution"] = dict(self.config["execution"])
+            cfg["execution"]["ledger_db_path"] = str(Path(tmpdir) / "ledger.db")
+            cfg["execution"]["fill_policy"] = {"min_rest_seconds": 1.0, "max_fill_fraction_per_snapshot": 0.5}
+            market = dict(self.market)
+            market["end_ts"] = 9999999999.0
+            fake_md.market = market
+            fake_md.resolved_market = dict(market)
+            executor = PolymarketExecutor(cfg, fake_md, mode="paper", run_id="run-ledger")
+            await executor.__aenter__()
+            try:
+                order_id = await executor.place_order(
+                    "m1",
+                    "Up",
+                    "BUY",
+                    10,
+                    0.50,
+                    strategy_family="toxicity_mm",
+                    order_kind="quote",
+                    market=market,
+                )
+                created_ts = executor.orders[order_id]["timestamp"]
+                crossed_book = self._orderbook(up_bid=0.49, up_ask=0.50, down_bid=0.50, down_ask=0.52, ts=created_ts + 2.0)
+                fills = executor.evaluate_market_orders("m1", crossed_book)
+                self.assertEqual(len(fills), 1)
+                self.assertAlmostEqual(fills[0]["size"], 5.0)
+                self.assertAlmostEqual(executor.positions[("toxicity_mm", "m1", "Up")].quantity, 5.0)
+                ledger_events = SQLiteLedger(Path(cfg["execution"]["ledger_db_path"]))
+                self.assertEqual(
+                    [event.event_type for event in ledger_events.list_events(run_id="run-ledger")],
+                    ["order_created", "order_acknowledged", "fill_observed", "fill_applied"],
+                )
+            finally:
+                await executor.__aexit__(None, None, None)
+
+            restored = PolymarketExecutor(cfg, fake_md, mode="paper", run_id="run-ledger")
+            restored.register_market(market)
+            self.assertIn(order_id, restored.orders)
+            self.assertEqual(restored.orders[order_id]["status"], "partially_filled")
+            self.assertAlmostEqual(restored.orders[order_id]["filled_qty"], 5.0)
+            self.assertAlmostEqual(restored.positions[("toxicity_mm", "m1", "Up")].quantity, 5.0)
+
+    async def test_executor_restores_pending_resolution_and_settlement_from_ledger(self):
+        fake_md = FakeMarketData(self.market)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = dict(self.config)
+            cfg["execution"] = dict(self.config["execution"])
+            cfg["execution"]["ledger_db_path"] = str(Path(tmpdir) / "ledger.db")
+            executor = PolymarketExecutor(cfg, fake_md, mode="paper", run_id="run-settle")
+            await executor.__aenter__()
+            try:
+                order_id = await executor.place_order(
+                    "m1",
+                    "Up",
+                    "BUY",
+                    10,
+                    0.50,
+                    post_only=False,
+                    strategy_family="mean_reversion_5min",
+                    order_kind="signal",
+                    market=self.market,
+                )
+                executor.fill_order(order_id, fill_price=0.50, fill_ts=101.0)
+                fake_md.resolved_market.update({"closed": False, "outcome_prices": [0.5, 0.5]})
+                pending_events = await executor.process_pending_resolutions(now_ts=131.0)
+                self.assertTrue(any(event["event_type"] == "market.pending_resolution" for event in pending_events))
+                self.assertIn(self.market["slot_id"], executor.pending_resolution)
+            finally:
+                await executor.__aexit__(None, None, None)
+
+            restored_pending = PolymarketExecutor(cfg, fake_md, mode="paper", run_id="run-settle")
+            restored_pending.register_market(self.market)
+            self.assertIn(self.market["slot_id"], restored_pending.pending_resolution)
+            self.assertEqual(restored_pending.get_runtime_snapshot(now_ts=132.0)["open_position_count"], 1)
+
+            fake_md.resolved_market.update({"closed": True, "outcome_prices": [1.0, 0.0]})
+            settlement_events = await restored_pending.process_pending_resolutions(now_ts=160.0)
+            self.assertTrue(any(event["event_type"] == "market.settled" for event in settlement_events))
+
+            restored_final = PolymarketExecutor(cfg, fake_md, mode="paper", run_id="run-settle")
+            restored_final.register_market(self.market)
+            snapshot = restored_final.get_runtime_snapshot(now_ts=151.0)
+            self.assertEqual(snapshot["open_position_count"], 0)
+            self.assertEqual(snapshot["pending_resolution_slots"], [])
+            self.assertEqual(snapshot["resolved_trade_count"], 1)
+            self.assertEqual(snapshot["win_count"], 1)
+            self.assertEqual(snapshot["loss_count"], 0)
+            self.assertAlmostEqual(snapshot["win_rate"], 1.0)
+            self.assertIsNotNone(snapshot["latest_settlement"])
+            ledger_events = SQLiteLedger(Path(cfg["execution"]["ledger_db_path"]))
+            event_types = [event.event_type for event in ledger_events.list_events(run_id="run-settle")]
+            self.assertIn("slot_resolution_pending", event_types)
+            self.assertIn("slot_settled", event_types)
 
 
 if __name__ == "__main__":

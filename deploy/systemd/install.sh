@@ -1,79 +1,84 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# install.sh — install polymarket-paper-bot systemd unit
-# Usage: sudo bash deploy/systemd/install.sh
-#
-# ROLLBACK:
-#   sudo systemctl stop polymarket-paper-bot
-#   sudo systemctl disable polymarket-paper-bot
-#   sudo cp /etc/systemd/system/polymarket-paper-bot.service.bak \
-#      /etc/systemd/system/polymarket-paper-bot.service
-#   sudo cp /etc/systemd/system/polymarket-paper-bot.service.bak /etc/systemd/system/polymarket-paper-bot.service
-#   sudo systemctl daemon-reload
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SERVICE_FILE="$REPO_ROOT/deploy/systemd/polymarket-paper-bot.service"
-SYSTEMD_DIR="/etc/systemd/system"
-TARGET="$SYSTEMD_DIR/polymarket-paper-bot.service"
+BOT_NAME="polymarket-paper-bot"
+RESEARCH_SERVICE="polymarket-paper-research.service"
+RESEARCH_TIMER="polymarket-paper-research.timer"
+
+SERVICE_FILE="$REPO_ROOT/deploy/systemd/${BOT_NAME}.service"
+RESEARCH_SERVICE_FILE="$REPO_ROOT/deploy/systemd/${RESEARCH_SERVICE}"
+RESEARCH_TIMER_FILE="$REPO_ROOT/deploy/systemd/${RESEARCH_TIMER}"
+
+TARGET_SERVICE="/etc/systemd/system/${BOT_NAME}.service"
+TARGET_RESEARCH_SERVICE="/etc/systemd/system/${RESEARCH_SERVICE}"
+TARGET_RESEARCH_TIMER="/etc/systemd/system/${RESEARCH_TIMER}"
 
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Error: run as root (sudo $0)" >&2
+  echo "ERROR: run as root (sudo bash deploy/systemd/install.sh)" >&2
+  exit 1
+fi
+
+for file in "$SERVICE_FILE" "$RESEARCH_SERVICE_FILE" "$RESEARCH_TIMER_FILE"; do
+  if [ ! -f "$file" ]; then
+    echo "ERROR: required systemd asset missing: $file" >&2
     exit 1
+  fi
+done
+
+mkdir -p "$REPO_ROOT/data/runtime" "$REPO_ROOT/data/research"
+
+if [ ! -x "$REPO_ROOT/.venv/bin/python" ]; then
+  echo "ERROR: missing virtualenv python at $REPO_ROOT/.venv/bin/python" >&2
+  exit 1
 fi
 
-if [ ! -f "$SERVICE_FILE" ]; then
-    echo "Error: service file not found at $SERVICE_FILE" >&2
-    exit 1
-fi
+backup_if_present() {
+  local src="$1"
+  if [ -f "$src" ]; then
+    cp "$src" "$src.bak"
+    echo "Backed up existing unit to $src.bak"
+  fi
+}
 
-echo "=== Polymarket Paper Bot — systemd install ==="
-echo "Source:      $SERVICE_FILE"
-echo "Destination: $TARGET"
-echo ""
-echo "Installing polymarket-paper-bot.service ..."
+backup_if_present "$TARGET_SERVICE"
+backup_if_present "$TARGET_RESEARCH_SERVICE"
+backup_if_present "$TARGET_RESEARCH_TIMER"
 
-# Backup existing unit if present
-if [ -f "$TARGET" ]; then
-    cp "$TARGET" "$TARGET.bak"
-    echo "Backed up existing unit -> $TARGET.bak"
-fi
-
-# Install
-cp "$SERVICE_FILE" "$TARGET"
-chmod 644 "$TARGET"
-echo "Installed unit file."
-
-# Activate
-cp "$SERVICE_FILE" "$TARGET"
-chmod 644 "$TARGET"
+cp "$SERVICE_FILE" "$TARGET_SERVICE"
+cp "$RESEARCH_SERVICE_FILE" "$TARGET_RESEARCH_SERVICE"
+cp "$RESEARCH_TIMER_FILE" "$TARGET_RESEARCH_TIMER"
+chmod 644 "$TARGET_SERVICE" "$TARGET_RESEARCH_SERVICE" "$TARGET_RESEARCH_TIMER"
 
 systemctl daemon-reload
-systemctl enable polymarket-paper-bot
-systemctl restart polymarket-paper-bot
+systemctl enable "$BOT_NAME"
+systemctl restart "$BOT_NAME"
+systemctl enable --now "$RESEARCH_TIMER"
 
-echo ""
-echo "=== Service status ==="
-systemctl status polymarket-paper-bot --no-pager
+echo
+echo "=== systemd status ==="
+systemctl status "$BOT_NAME" --no-pager
 
-echo ""
-echo "=== Recent logs ==="
-journalctl -u polymarket-paper-bot --no-pager -n 30
+echo
+echo "=== ExecStart verification ==="
+systemctl show "$BOT_NAME" -p ExecStart -p WorkingDirectory --no-pager
 
-echo ""
-echo "Status:  systemctl status polymarket-paper-bot"
-echo "Follow:  journalctl -u polymarket-paper-bot -f"
-echo "Stop:    sudo systemctl stop polymarket-paper-bot"
-echo ""
-echo "Rollback:"
-echo "  sudo cp $TARGET.bak $TARGET"
-echo "  sudo systemctl daemon-reload"
-echo "  sudo systemctl restart polymarket-paper-bot"
-journalctl -u polymarket-paper-bot --no-pager -n 20
+echo
+echo "=== research timer ==="
+systemctl status "$RESEARCH_TIMER" --no-pager
+systemctl list-timers "$RESEARCH_TIMER" --no-pager
 
-echo ""
-echo "Status:     systemctl status polymarket-paper-bot"
-echo "Logs:       journalctl -u polymarket-paper-bot -f"
-echo "Stop:       sudo systemctl stop polymarket-paper-bot"
-echo "Rollback:   sudo cp $TARGET.bak $TARGET && sudo systemctl daemon-reload && sudo systemctl restart polymarket-paper-bot"
+echo
+echo "=== recent bot logs ==="
+journalctl -u "$BOT_NAME" -n 30 --no-pager
+
+echo
+echo "=== recent research logs ==="
+journalctl -u polymarket-paper-research.service -n 30 --no-pager || true
+
+echo
+echo "Follow bot logs: journalctl -u $BOT_NAME -f"
+echo "Follow research logs: journalctl -u polymarket-paper-research.service -f"
+echo "Rollback bot: cp $TARGET_SERVICE.bak $TARGET_SERVICE && systemctl daemon-reload && systemctl restart $BOT_NAME"
+echo "Rollback research: cp $TARGET_RESEARCH_SERVICE.bak $TARGET_RESEARCH_SERVICE; cp $TARGET_RESEARCH_TIMER.bak $TARGET_RESEARCH_TIMER; systemctl daemon-reload && systemctl restart $BOT_NAME && systemctl restart $RESEARCH_TIMER"

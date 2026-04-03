@@ -1,36 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 BOT_NAME="polymarket-paper-bot"
-systemctl stop "$BOT_NAME" 2>/dev/null || true
-systemctl disable "$BOT_NAME" 2>/dev/null || true
-rm -f "/etc/systemd/system/$BOT_NAME.service"
-systemctl daemon-reload
-echo "Uninstalled $BOT_NAME"
-
-#!/bin/bash
-set -euo pipefail
-
-# uninstall.sh — rollback the polymarket-paper-bot systemd unit
-set -euo pipefail
-
-SERVICE_DST="/etc/systemd/system/polymarket-paper-bot.service"
+RESEARCH_SERVICE="polymarket-paper-research.service"
+RESEARCH_TIMER="polymarket-paper-research.timer"
+SERVICE_DST="/etc/systemd/system/${BOT_NAME}.service"
+RESEARCH_SERVICE_DST="/etc/systemd/system/${RESEARCH_SERVICE}"
+RESEARCH_TIMER_DST="/etc/systemd/system/${RESEARCH_TIMER}"
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "ERROR: Run as root (sudo $0)" >&2
+  echo "ERROR: Run as root (sudo bash deploy/systemd/uninstall.sh)" >&2
   exit 1
 fi
 
-echo "=== Rolling back polymarket-paper-bot ==="
-systemctl stop polymarket-paper-bot 2>/dev/null || true
-systemctl disable polymarket-paper-bot 2>/dev/null || true
+systemctl stop "$RESEARCH_TIMER" 2>/dev/null || true
+systemctl disable "$RESEARCH_TIMER" 2>/dev/null || true
+systemctl stop "$BOT_NAME" 2>/dev/null || true
+systemctl disable "$BOT_NAME" 2>/dev/null || true
 
-if [ -f "$SERVICE_DST.bak" ]; then
-  cp "$SERVICE_DST.bak" "$SERVICE_DST"
-  echo "Restored backup unit."
-else
-  rm -f "$SERVICE_DST"
-  echo "Removed unit file (no backup found)."
-fi
+restore_or_remove() {
+  local dst="$1"
+  if [ -f "$dst.bak" ]; then
+    cp "$dst.bak" "$dst"
+    echo "Restored backup unit to $dst"
+  else
+    rm -f "$dst"
+    echo "Removed unit file $dst"
+  fi
+}
+
+restore_or_remove "$SERVICE_DST"
+restore_or_remove "$RESEARCH_SERVICE_DST"
+restore_or_remove "$RESEARCH_TIMER_DST"
 
 systemctl daemon-reload
-echo "Rollback complete."
+echo "Uninstall/rollback complete for $BOT_NAME and research timer"

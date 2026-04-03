@@ -18,6 +18,7 @@ import yaml
 from research.loop import ResearchLoop
 from research.polymarket import PolymarketRuntimeResearchAdapter
 from runtime_telemetry import RuntimeTelemetry
+from status_utils import render_status_text, runtime_health_payload
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,6 +86,13 @@ def _emit_events(runtime: RuntimeTelemetry, events: Iterable[Dict]) -> None:
         runtime.append_event(event_type, payload)
 
 
+def _resolve_active_strategies(cfg: dict, strategies: str | None) -> List[str]:
+    if strategies and strategies.strip():
+        return [item.strip() for item in strategies.split(",") if item.strip()]
+    configured = cfg.get("strategies", {}).get("active", [])
+    return [str(item).strip() for item in configured if str(item).strip()]
+
+
 def _active_slot_summary(markets: List[Dict]) -> List[Dict]:
     return [
         {
@@ -110,7 +118,7 @@ def _enforce_clock_drift(drift_seconds: float) -> None:
 
 @cli.command()
 @click.option("--mode", type=click.Choice(["backtest", "paper", "live"]), default="paper", help="Execution mode")
-@click.option("--strategies", default="toxicity_mm", help="Comma-separated active strategies")
+@click.option("--strategies", default=None, help="Comma-separated active strategies (defaults to config.yaml strategies.active)")
 @click.option("--max-loops", type=int, default=0, help="Bounded loop count for smoke tests")
 @click.option("--runtime-dir", default="data/runtime", help="Directory for durable runtime telemetry")
 @click.option("--sleep-seconds", type=int, default=15, help="Loop sleep duration")
@@ -121,14 +129,16 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     from market_data import PolymarketData
     from risk import RiskManager
     from strategies.mean_reversion_5min import MeanReversion5Min
+    from strategies.opening_range import OpeningRangeBreakout
+    from strategies.time_decay import TimeDecay
     from strategies.toxicity_mm import ToxicityMM
 
     if mode == "live":
         raise click.ClickException("Live mode is deferred until the restored paper workflow is proven.")
 
     cfg = load_cfg()
-    active_strategies = [item.strip() for item in strategies.split(",") if item.strip()]
-    cfg["strategies"]["active"] = active_strategies
+    active_strategies = _resolve_active_strategies(cfg, strategies)
+    cfg.setdefault("strategies", {})["active"] = active_strategies
     filters = cfg.get("filters", {})
     initial_capital = float(cfg.get("execution", {}).get("paper_starting_bankroll", 500.0))
 
@@ -153,12 +163,16 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
             _enforce_clock_drift(startup["clock_drift_seconds"])
             runtime.append_event("runtime.startup_check", startup)
 
+            cfg.setdefault("execution", {})
+            cfg["execution"].setdefault("ledger_db_path", str(Path(runtime_dir) / "ledger.db"))
+
             mean_rev = MeanReversion5Min(cfg)
+            opening_range = OpeningRangeBreakout(cfg)
+            time_decay = TimeDecay(cfg)
             mm = ToxicityMM(cfg)
             risk_mgr = RiskManager(cfg, initial_capital=initial_capital)
-            executor = PolymarketExecutor(cfg, md, mode=mode)
+            executor = PolymarketExecutor(cfg, md, mode=mode, run_id=run_id)
             await executor.__aenter__()
-            last_realized_total = 0.0
             loop_count = 0
 
             try:
@@ -187,6 +201,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                     processed_markets = 0
                     toxic_skips = 0
                     fill_events: List[Dict] = []
+                    orderbooks_by_market: Dict[str, object] = {}
 
                     for idx, market in enumerate(all_markets):
                         market_id = market["id"]
@@ -198,6 +213,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                             continue
 
                         orderbook = ob_or_exc
+                        orderbooks_by_market[market_id] = orderbook
                         book_quality = assess_book_quality(
                             orderbook,
                             primary_outcome,
@@ -229,17 +245,13 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                             interval_minutes=market.get("interval_minutes"),
                         )
 
-                        if "mean_reversion_5min" in active_strategies:
-                            executor.note_market_seen("mean_reversion_5min")
-                        if "toxicity_mm" in active_strategies:
-                            executor.note_market_seen("toxicity_mm")
+                        for strategy_family in active_strategies:
+                            executor.note_market_seen(strategy_family)
 
                         if not book_quality.is_tradeable:
                             toxic_skips += 1
-                            if "mean_reversion_5min" in active_strategies:
-                                executor.note_toxic_book_skip("mean_reversion_5min")
-                            if "toxicity_mm" in active_strategies:
-                                executor.note_toxic_book_skip("toxicity_mm")
+                            for strategy_family in active_strategies:
+                                executor.note_toxic_book_skip(strategy_family)
                             runtime.append_event("market.skipped_toxic_book", {
                                 "market_id": market_id,
                                 "market_slug": market["slug"],
@@ -268,6 +280,36 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                         f"SIGNAL: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{mid:.4f} ({signal.reason})"
                                     )
                                     result = await executor.execute_signal_trade(market, orderbook, signal)
+                                    _emit_events(runtime, result.get("events", []))
+
+                        if "opening_range" in active_strategies:
+                            opening_range.update_price(market_id, mid, volume)
+                            signal = opening_range.generate_signal(
+                                market_id,
+                                primary_outcome,
+                                mid,
+                                orderbook,
+                                volume,
+                                slot_id=market.get("slot_id", ""),
+                            )
+                            if signal:
+                                signal.size = risk_mgr.cap_requested_size(max(signal.price, 0.01), signal.size)
+                                if signal.size > 0 and not executor.has_strategy_market_exposure("opening_range", market_id):
+                                    click.echo(
+                                        f"OPENING RANGE: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
+                                    )
+                                    result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="opening_range")
+                                    _emit_events(runtime, result.get("events", []))
+
+                        if "time_decay" in active_strategies:
+                            signal = time_decay.generate_signal(market_id, market, orderbook, current_time=loop_now)
+                            if signal:
+                                signal.size = risk_mgr.cap_requested_size(max(signal.price, 0.01), signal.size)
+                                if signal.size > 0 and not executor.has_strategy_market_exposure("time_decay", market_id):
+                                    click.echo(
+                                        f"TIME DECAY: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
+                                    )
+                                    result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="time_decay")
                                     _emit_events(runtime, result.get("events", []))
 
                         if "toxicity_mm" in active_strategies:
@@ -323,19 +365,18 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                     settlement_events = await executor.process_pending_resolutions(now_ts=time.time())
                     _emit_events(runtime, settlement_events)
 
-                    realized_total = executor.get_realized_pnl_total()
-                    realized_delta = realized_total - last_realized_total
-                    if realized_delta:
-                        risk_mgr.update_capital(realized_delta)
-                    last_realized_total = realized_total
-
                     positions = await executor.refresh_positions()
                     strategy_metrics = executor.get_family_metrics()
                     runtime.write_strategy_metrics(strategy_metrics)
 
-                    executor_snapshot = executor.get_runtime_snapshot(now_ts=time.time())
-                    risk_report = risk_mgr.get_risk_report()
-                    risk_report["positions"] = executor_snapshot["open_position_count"]
+                    snapshot_ts = time.time()
+                    executor_snapshot = executor.get_runtime_snapshot(now_ts=snapshot_ts, orderbooks_by_market=orderbooks_by_market)
+                    risk_report = risk_mgr.get_risk_report(
+                        executor_snapshot=executor_snapshot,
+                        ledger_events=executor.get_ledger_events(),
+                        now_ts=snapshot_ts,
+                    )
+                    executor.record_risk_snapshot(risk_report, snapshot_ts=snapshot_ts)
                     runtime.write_runtime_snapshot(
                         run_id=run_id,
                         phase="running",
@@ -364,7 +405,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         )
                     )
 
-                    if risk_mgr.check_circuit_breakers():
+                    if risk_mgr.check_circuit_breakers(risk_report):
                         runtime.append_event("runtime.circuit_breaker", {"run_id": run_id, "risk": risk_report})
                         click.echo("CIRCUIT BREAKER TRIGGERED — stopping trading")
                         break
@@ -476,6 +517,25 @@ def collect():
                 click.echo(f"Saved {len(records)} records to {fname}")
 
     asyncio.run(collect_loop())
+
+
+@cli.command()
+@click.option("--runtime-dir", default="data/runtime", help="Directory containing live runtime artifacts")
+def status(runtime_dir):
+    """Render the current replay-backed runtime status."""
+    click.echo(render_status_text(runtime_dir))
+
+
+@cli.command(name="health")
+@click.option("--runtime-dir", default="data/runtime", help="Directory containing live runtime artifacts")
+@click.option("--max-heartbeat-age", default=180, help="Max acceptable heartbeat age in seconds")
+def health_cmd(runtime_dir, max_heartbeat_age):
+    """Check runtime health from durable heartbeat artifacts."""
+    payload = runtime_health_payload(runtime_dir, max_heartbeat_age=max_heartbeat_age)
+    click.echo(render_status_text(runtime_dir))
+    click.echo(f"Healthy: {payload['healthy']} (threshold={max_heartbeat_age}s)")
+    if not payload["healthy"]:
+        raise SystemExit(1)
 
 
 @cli.command()
