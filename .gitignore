@@ -1,13 +1,11 @@
 __pycache__/
 *.pyc
 data/runtime/
+data/runtime-smoke*/
+data/research/
 data/collection_*.csv
 data/sample_backtest.csv
 logs/
 .env
 .venv/
-.venv/
-__pycache__/
-*.pyc
-data/collection_*.csv
-data/runtime/
+deploy/systemd/*.bak

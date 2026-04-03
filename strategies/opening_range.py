@@ -94,7 +94,7 @@ class OpeningRangeBreakout:
             state["broken"] = True
             state["broken_direction"] = "up"
             # BUY the primary outcome (e.g., "Up")
-            best_ask = max(orderbook.yes_asks[0][0], orderbook.no_asks[0][0]) if orderbook.yes_asks or orderbook.no_asks else price
+            best_ask = orderbook.yes_asks[0][0] if orderbook.yes_asks else price
             return Signal(
                 market_id=market_id,
                 outcome=primary_outcome,
@@ -110,7 +110,7 @@ class OpeningRangeBreakout:
             state["broken_direction"] = "down"
             # BUY the opposite outcome
             opposite = orderbook.outcome_labels[1] if primary_outcome == orderbook.outcome_labels[0] else orderbook.outcome_labels[0]
-            best_ask = max(orderbook.no_asks[0][0], orderbook.yes_asks[0][0]) if orderbook.yes_asks or orderbook.no_asks else price
+            best_ask = orderbook.no_asks[0][0] if orderbook.no_asks else price
             return Signal(
                 market_id=market_id,
                 outcome=opposite,

@@ -702,7 +702,7 @@ class PolymarketExecutor:
             },
         ]
 
-    async def execute_signal_trade(self, market: Dict, orderbook: "OrderBook", signal) -> Dict:
+    async def execute_signal_trade(self, market: Dict, orderbook: "OrderBook", signal, strategy_family: str = "mean_reversion_5min") -> Dict:
         self.register_market(market)
         slot_id = market["slot_id"]
         events: List[Dict] = []
@@ -729,19 +729,19 @@ class PolymarketExecutor:
             signal.size,
             fill_price,
             post_only=False,
-            strategy_family="mean_reversion_5min",
+            strategy_family=strategy_family,
             order_kind="signal",
             market=market,
         )
         if not order_id:
             return {"opened": False, "reason": "order_rejected", "events": events}
         fill = self.fill_order(order_id, fill_price=fill_price, fill_ts=orderbook.timestamp)
-        position = self.positions[( "mean_reversion_5min", market["id"], signal.outcome)]
+        position = self.positions[(strategy_family, market["id"], signal.outcome)]
         slot_state = SlotState(
             slot_id=slot_id,
             market_id=market["id"],
             market_slug=market["slug"],
-            strategy_family="mean_reversion_5min",
+            strategy_family=strategy_family,
             outcome=signal.outcome,
             quantity=position.quantity,
             average_price=position.average_price,
@@ -756,7 +756,7 @@ class PolymarketExecutor:
                 "slot_id": slot_id,
                 "market_id": market["id"],
                 "market_slug": market["slug"],
-                "strategy_family": "mean_reversion_5min",
+                "strategy_family": strategy_family,
                 "outcome": signal.outcome,
                 "side": signal.action,
                 "size": signal.size,

@@ -1,22 +1,33 @@
 {
-  "scout": {
-    "goal": "Inspect live runtime artifacts and surface anomalies in fill rates, toxic-book skip reasons, and realized pnl by family.",
-    "inputs": ["data/runtime/status.json", "data/runtime/strategy_metrics.json", "data/runtime/market_samples.jsonl"],
-    "outputs": ["ranked anomaly list", "candidate hypotheses"]
-  },
-  "experimenter": {
-    "goal": "Turn runtime anomalies into parameter sweeps and replay experiments.",
-    "inputs": ["runtime anomaly list", "sample backtest data"],
-    "outputs": ["experiment plan", "parameter deltas"]
-  },
-  "analyst": {
-    "goal": "Compare live runtime artifacts vs historical backtest expectations.",
-    "inputs": ["runtime research artifacts", "backtest summaries"],
-    "outputs": ["confidence-ranked conclusions", "promotion/kill recommendations"]
-  },
-  "reporter": {
-    "goal": "Write operator-facing markdown and JSON summaries with next actions.",
-    "inputs": ["research cycle result"],
-    "outputs": ["markdown report", "json artifact"]
-  }
+  "version": 1,
+  "roles": [
+    {
+      "name": "scout",
+      "goal": "Scan runtime artifacts fast and surface anomalies, broken assumptions, and structural bottlenecks.",
+      "inputs": ["status.json", "strategy_metrics.json", "events.jsonl", "market_samples.jsonl"],
+      "outputs": ["candidate bottlenecks", "skip-reason ranking", "market-supply conversion summary"],
+      "constraints": ["Do not recommend changes without citing artifacts.", "Prefer structural bottlenecks over anecdotal single fills."]
+    },
+    {
+      "name": "experimenter",
+      "goal": "Turn runtime bottlenecks into measurable config and strategy experiments.",
+      "inputs": ["scout findings", "recent fills", "skip reasons", "strategy metrics"],
+      "outputs": ["parameter sweep ideas", "strategy activation/deactivation proposals", "next 3 experiments"],
+      "constraints": ["Each experiment must define the metric that would prove it worked.", "Bias toward low-risk paper-mode changes first."]
+    },
+    {
+      "name": "analyst",
+      "goal": "Rank strategy families by real runtime quality instead of theory.",
+      "inputs": ["family metrics", "risk snapshot", "fills", "open exposure"],
+      "outputs": ["family quality ranking", "capital allocation suggestions", "kill/promote list"],
+      "constraints": ["Prefer pnl per fill and decision density over vanity event counts.", "Treat no-fill strategies as liabilities until proven otherwise."]
+    },
+    {
+      "name": "reporter",
+      "goal": "Write the operator-facing memo with the top recommendation and exact next actions.",
+      "inputs": ["scout findings", "experiment plans", "analyst ranking"],
+      "outputs": ["markdown report", "latest.json summary", "top recommendation"],
+      "constraints": ["The first paragraph must state whether the bot is compounding edge or just collecting telemetry.", "Recommendations must be executable within the repo."]
+    }
+  ]
 }

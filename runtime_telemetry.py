@@ -6,6 +6,8 @@ import uuid
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
+from research.loop import read_jsonl_tail
+
 
 class RuntimeTelemetry:
     def __init__(self, runtime_dir: str | Path):
@@ -64,12 +66,7 @@ class RuntimeTelemetry:
         return self.read_json(self.strategy_metrics_path) or {}
 
     def read_jsonl(self, path: Path, limit: Optional[int] = None) -> Iterable[Dict]:
-        if not path.exists():
-            return []
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if limit is not None:
-            rows = rows[-limit:]
-        return rows
+        return list(read_jsonl_tail(path, limit=limit))
 
     def read_events(self, limit: Optional[int] = None):
         return list(self.read_jsonl(self.events_path, limit=limit))

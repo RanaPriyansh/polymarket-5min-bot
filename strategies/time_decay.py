@@ -66,7 +66,10 @@ class TimeDecay:
         best_signal = None
 
         for i, outcome in enumerate(outcomes):
-            bids, asks = orderbook.yes_bids, orderbook.yes_asks if i == 0 else (orderbook.no_bids, orderbook.no_asks)
+            if i == 0:
+                bids, asks = orderbook.yes_bids, orderbook.yes_asks
+            else:
+                bids, asks = orderbook.no_bids, orderbook.no_asks
             if not bids or not asks:
                 continue
 

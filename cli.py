@@ -129,6 +129,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     from market_data import PolymarketData
     from risk import RiskManager
     from strategies.mean_reversion_5min import MeanReversion5Min
+    from strategies.opening_range import OpeningRangeBreakout
+    from strategies.time_decay import TimeDecay
     from strategies.toxicity_mm import ToxicityMM
 
     if mode == "live":
@@ -165,6 +167,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
             cfg["execution"].setdefault("ledger_db_path", str(Path(runtime_dir) / "ledger.db"))
 
             mean_rev = MeanReversion5Min(cfg)
+            opening_range = OpeningRangeBreakout(cfg)
+            time_decay = TimeDecay(cfg)
             mm = ToxicityMM(cfg)
             risk_mgr = RiskManager(cfg, initial_capital=initial_capital)
             executor = PolymarketExecutor(cfg, md, mode=mode, run_id=run_id)
@@ -241,17 +245,13 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                             interval_minutes=market.get("interval_minutes"),
                         )
 
-                        if "mean_reversion_5min" in active_strategies:
-                            executor.note_market_seen("mean_reversion_5min")
-                        if "toxicity_mm" in active_strategies:
-                            executor.note_market_seen("toxicity_mm")
+                        for strategy_family in active_strategies:
+                            executor.note_market_seen(strategy_family)
 
                         if not book_quality.is_tradeable:
                             toxic_skips += 1
-                            if "mean_reversion_5min" in active_strategies:
-                                executor.note_toxic_book_skip("mean_reversion_5min")
-                            if "toxicity_mm" in active_strategies:
-                                executor.note_toxic_book_skip("toxicity_mm")
+                            for strategy_family in active_strategies:
+                                executor.note_toxic_book_skip(strategy_family)
                             runtime.append_event("market.skipped_toxic_book", {
                                 "market_id": market_id,
                                 "market_slug": market["slug"],
@@ -280,6 +280,36 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                         f"SIGNAL: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{mid:.4f} ({signal.reason})"
                                     )
                                     result = await executor.execute_signal_trade(market, orderbook, signal)
+                                    _emit_events(runtime, result.get("events", []))
+
+                        if "opening_range" in active_strategies:
+                            opening_range.update_price(market_id, mid, volume)
+                            signal = opening_range.generate_signal(
+                                market_id,
+                                primary_outcome,
+                                mid,
+                                orderbook,
+                                volume,
+                                slot_id=market.get("slot_id", ""),
+                            )
+                            if signal:
+                                signal.size = risk_mgr.cap_requested_size(max(signal.price, 0.01), signal.size)
+                                if signal.size > 0 and not executor.has_strategy_market_exposure("opening_range", market_id):
+                                    click.echo(
+                                        f"OPENING RANGE: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
+                                    )
+                                    result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="opening_range")
+                                    _emit_events(runtime, result.get("events", []))
+
+                        if "time_decay" in active_strategies:
+                            signal = time_decay.generate_signal(market_id, market, orderbook, current_time=loop_now)
+                            if signal:
+                                signal.size = risk_mgr.cap_requested_size(max(signal.price, 0.01), signal.size)
+                                if signal.size > 0 and not executor.has_strategy_market_exposure("time_decay", market_id):
+                                    click.echo(
+                                        f"TIME DECAY: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
+                                    )
+                                    result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="time_decay")
                                     _emit_events(runtime, result.get("events", []))
 
                         if "toxicity_mm" in active_strategies:
