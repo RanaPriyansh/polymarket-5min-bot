@@ -1,154 +1,129 @@
-# Polymarket 5/15-Minute Bot
+# Polymarket 5/15-Minute Paper Bot
 
-**Fast, automated trading on ultra-short-duration prediction markets.**
+**Ledger-backed paper trading runtime for Polymarket ultra-short-duration interval markets.**
 
-## Edges Implemented
+Live trading is explicitly blocked until the paper runtime is operationally credible.
 
-1. **Mean Reversion (EMA + Order Book Imbalance)**
-   - 5/15-minute markets exhibit mean-reverting behavior due to market maker inventory cycling.
-   - Enters when price deviates >8% from EMA(20) AND order book imbalance supports reversal.
-   - Target: 60-65% win rate with Kelly sizing.
+## Architecture
 
-2. **Toxicity-Aware Market Making**
-   - Provides liquidity when VPIN (volume-order imbalance) is low (<0.6).
-   - Steps back when toxic flow detected to avoid adverse selection.
-   - Dynamic spread adjustment based on volatility and inventory.
-
-3. **Longshot Bias Exploitation** *(planned)*
-   - Systematically short overpriced low-probability events (1-5%) that retail traders overbuy.
-   - High win rate, but requires careful hedging.
-
-4. **Resolution Information Edge** *(future)*
-   - For markets resolving within minutes, integrates external feeds to know outcome first.
-
-## Project Structure
+The bot is designed around execution truth as a first-class concern:
 
 ```
-polymarket-5min-bot/
-├── strategies/
-│   ├── mean_reversion_5min.py  # core mean reversion logic
-│   └── toxicity_mm.py         # market making with VPIN filter
-├── market_data.py             # Polymarket CLOB + Gamma API wrapper
-├── execution.py               # order placement, signing, position tracking
-├── risk.py                    # Kelly criterion, circuit breakers
-├── backtest_engine.py         # historical replay and metrics
-├── cli.py                     # command-line interface
-├── config.yaml                # configuration (strategies, risk limits)
-├── Dockerfile                 # containerization
-└── scripts/
-    └── collector.py           # order book data collection for backtesting
+discover -> validate -> decide -> execute -> persist -> replay -> report
 ```
 
-## Quick Start
+- `market_data.py` — Polymarket CLOB + Gamma API wrapper for interval market discovery
+- `cli.py` — runtime entrypoint (paper / backtest / collect / status / health / research); live mode blocked
+- `execution.py` — ledger-backed paper execution: orders, fills, positions, settlement, replay, exposure
+- `risk.py` — mark-to-market and exposure-aware risk reporting from executor snapshots + ledger events
+- `runtime_telemetry.py` — durable status, events (JSONL), strategy metrics, market samples, latest-status text
+- `research/loop.py` — generic autoresearch orchestration with deduped latest outputs
+- `research/polymarket.py` — domain adapter: family quality, skip-reason analysis, next actions
+- `ledger.py` / `replay.py` — append-only event storage and deterministic replay engine
+- `paper_exchange.py` — conservative fill engine
+- `settlement_engine.py` — idempotent position resolution via ledger events
 
-### 1. Install dependencies
+## Strategy Families
+
+### Active production-paper family
+| Family | Role | Status |
+|--------|------|--------|
+| `toxicity_mm` | VPIN-aware market making | Promoted — real fills and PnL |
+
+### Research candidates
+| Family | Role | Barrier to promotion |
+|--------|------|---------------------|
+| `mean_reversion_5min` | EMA deviation + order-book imbalance | 0 fills — double-screened by book-quality gate |
+| `opening_range` | Opening-range breakout on first N ticks | 0 fills — gate issue + was drifting (fixed) |
+| `time_decay` | Near-resolution binary convergence plays | 0 fills — gate issue |
+
+Candidates stay wired and tested but are **inactive by default**. Promotion requires:
+1. Passing tests
+2. Real fills in paper runtime
+3. Positive pnl-per-fill evidence
+
+## Quick Start — Paper Runtime
 
 ```bash
 cd /root/obsidian-hermes-vault/projects/polymarket-5min-bot
-pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python cli.py run --mode paper
 ```
 
-### 2. Configure
+Status:
+```bash
+.venv/bin/python cli.py status
+.venv/bin/python cli.py health --max-heartbeat-age 180
+```
 
-Copy `.env.example` to `.env` and fill in your Polymarket wallet address and private key (for live trading). For paper trading, leave blank.
+Research:
+```bash
+.venv/bin/python cli.py research
+```
 
-Edit `config.yaml` to adjust:
-- `min_volume` (default $10k)
-- EMA period, deviation threshold
-- Kelly fraction (default 25%)
-- Max daily loss (5%) and drawdown breaker (10%)
-
-### 3. Collect historical data (optional but recommended)
+## Deployment (systemd)
 
 ```bash
-python scripts/collector.py
-# Let it run for a few hours to build a CSV of order book snapshots
-# Data saved to data/collection_YYYYMMDD_HHMMSS.csv
+sudo bash deploy/systemd/install.sh
 ```
 
-### 4. Backtest
+This installs:
+- `polymarket-paper-bot.service` — main bot loop at 5s cadence
+- `polymarket-paper-research.service` — one-shot research run
+- `polymarket-paper-research.timer` — fires every 15 minutes
+
+Rollback:
+```bash
+sudo bash deploy/systemd/uninstall.sh
+```
+
+## Configuration Secrets
+
+Secrets live in `.env`, never in tracked files:
+```
+POLYMARKET_WALLET_ADDRESS=
+POLYMARKET_PRIVATE_KEY=
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+```
+
+`config.yaml` contains only placeholders and public defaults.
+
+## Runtime Artifacts
+
+Written to `data/runtime/` (gitignored):
+- `status.json` — current runtime state
+- `events.jsonl` — append-only event stream
+- `strategy_metrics.json` — per-family counters
+- `market_samples.jsonl` — book-quality samples per loop
+- `ledger.db` — SQLite append-only ledger
+- `latest-status.txt` — human-readable snapshot
+
+Research artifacts in `data/research/` (gitignored):
+- `latest.json` / `latest.md` — newest autoresearch cycle
+- timestamped `cycle-*.json` / `cycle-*.md` — history, bounded retention
+
+## Tests
 
 ```bash
-python cli.py backtest --data data/your_collection.csv
+.venv/bin/python -m pytest -q
 ```
 
-This will simulate the mean reversion strategy and print stats: win rate, Sharpe, max drawdown, total PnL.
+Covers: ledger, replay, paper exchange, settlement, risk reporting, restore workflow, runtime features, strategy selection, autoresearch cycle, time-decay behavior.
 
-### 5. Run Paper Trading
+## Operating Rules
 
-```bash
-python cli.py run --mode paper
-```
-
-The bot will:
-- Scan Polymarket every minute for 5/15-minute active markets
-- Fetch order books for YES tokens
-- Generate signals from active strategies
-- Print signals to console (no real orders placed)
-
-### 6. Go Live
-
-```bash
-python cli.py run --mode live
-```
-
-**Requirements:**
-- Wallet with sufficient USDC balance on Polygon
-- Private key configured in `.env` (test with small amount first!)
-- Understand the risks: prediction markets are volatile and bots can lose money fast.
-
-### 7. Deploy via Docker (recommended for VPS)
-
-```bash
-docker build -t pm5minbot .
-docker run -d --name pmbot --restart unless-stopped --env-file .env -v $(pwd)/data:/app/data -v $(pwd)/logs:/app/logs pm5minbot
-```
-
-## Strategy Parameters
-
-Tweak in `config.yaml`:
-
-**Mean Reversion:**
-- `ema_period`: 20 (short-term trend)
-- `deviation_threshold`: 0.08 (8% deviation triggers)
-- `imbalance_threshold`: 0.3 (order book imbalance must confirm)
-
-**Market Making:**
-- `vpin_threshold`: 0.6 (toxicity filter)
-- `spread_multiplier`: 1.5 (widen spreads when volatile/toxic)
-- `kelly_fraction`: 0.2 (conservative)
-
-## Risk Management
-
-- **Kelly sizing** prevents overbetting
-- **Daily loss limit** (default 5%) halts trading
-- **Max drawdown** (default 10%) circuit breaker
-- **Position limits** per strategy (10% of capital)
-
-## Telegram Alerts
-
-Configure bot token and chat ID in `.env` or `config.yaml` to get real-time notifications for:
-- Entries and exits
-- PnL updates
-- Circuit breaker events
-- Errors
+1. Trust ledger + replay + runtime artifacts over README or memory
+2. Research outputs are advisory; strategies mutate only through config
+3. Require tests + runtime evidence + restart safety before promotion
+4. Prefer subtraction over adding cleverness
+5. Optimize only after the truth layer is clean
 
 ## Notes
 
-- This bot is for **5 and 15-minute** markets only. It will filter out longer-duration markets.
-- Works best on high-volume markets ($10k+ liquidity) to avoid slippage and manipulation.
-- Expect 1-3 trades per market per day; not a high-frequency scalper.
-- Backtest thoroughly before risking real capital.
-- Polymarket API may have rate limits; the bot is polite (1 request/sec).
+- 5/15-minute markets only; filters out longer-duration slots
+- Market making is the baseline; directional strategies are candidates
+- Expect modest PnL in paper mode; the goal is truthful evidence, not profit theater
+- Polymarket API rate limits exist; the bot is polite
 
-## Legal & Compliance
-
-- You are responsible for your own trading decisions and compliance with local laws.
-- This software is provided as-is, no warranty.
-- Never trade with money you cannot afford to lose.
-
-## Development
-
-Logs in `logs/`. Metrics in `data/`. Live metrics endpoint coming soon.
-
-Happy hunting! 🎯
+This software is provided as-is. You are responsible for your own decisions and compliance.

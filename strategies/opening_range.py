@@ -43,8 +43,13 @@ class OpeningRangeBreakout:
         state = self.opening_ranges.setdefault(market_id, {
             "high": price, "low": price,
             "ticks": 0, "prices": [],
-            "broken": False, "broken_direction": None
+            "broken": False, "broken_direction": None,
+            "range_frozen": False,
         })
+        # Once the opening range is frozen (after initial tick_count), stop evolving it.
+        if state["range_frozen"]:
+            return
+
         state["ticks"] += 1
         state["prices"].append(price)
         state["high"] = max(state["high"], price)
@@ -52,6 +57,10 @@ class OpeningRangeBreakout:
         # Keep only last 100 prices to prevent memory leak
         if len(state["prices"]) > 100:
             state["prices"] = state["prices"][-100:]
+
+        # Freeze the range once enough ticks have been collected.
+        if state["ticks"] >= self.tick_count:
+            state["range_frozen"] = True
 
     def generate_signal(self, market_id: str, primary_outcome: str,
                        price: float, orderbook: OrderBook,
