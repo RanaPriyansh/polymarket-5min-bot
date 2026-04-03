@@ -4,7 +4,7 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from research.loop import read_jsonl_tail
 
@@ -23,18 +23,22 @@ class RuntimeTelemetry:
     def make_run_id(prefix: str = "paper") -> str:
         return f"{prefix}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
 
-    def append_event(self, event_type: str, payload: Dict) -> None:
+    def append_event(self, event_type: str, payload: Dict, *, run_id: str | None = None) -> None:
+        resolved_run_id = run_id or payload.get("run_id") or self.current_run_id()
         event = {
             "ts": time.time(),
             "event_type": event_type,
+            "run_id": resolved_run_id,
             "payload": payload,
         }
         with self.events_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(event, sort_keys=True, default=str) + "\n")
 
-    def append_market_sample(self, payload: Dict) -> None:
+    def append_market_sample(self, payload: Dict, *, run_id: str | None = None) -> None:
+        resolved_run_id = run_id or payload.get("run_id") or self.current_run_id()
         sample = {
             "ts": time.time(),
+            "run_id": resolved_run_id,
             **payload,
         }
         with self.market_samples_path.open("a", encoding="utf-8") as fh:
@@ -62,17 +66,35 @@ class RuntimeTelemetry:
     def read_status(self) -> Dict:
         return self.read_json(self.status_path) or {}
 
+    def current_run_id(self) -> str | None:
+        status = self.read_status()
+        run_id = status.get("run_id")
+        return str(run_id) if run_id else None
+
     def read_strategy_metrics(self) -> Dict:
         return self.read_json(self.strategy_metrics_path) or {}
 
-    def read_jsonl(self, path: Path, limit: Optional[int] = None) -> Iterable[Dict]:
-        return list(read_jsonl_tail(path, limit=limit))
+    @staticmethod
+    def _row_run_id(row: Dict[str, Any]) -> str | None:
+        run_id = row.get("run_id")
+        if run_id:
+            return str(run_id)
+        payload = row.get("payload") or {}
+        if isinstance(payload, dict) and payload.get("run_id"):
+            return str(payload.get("run_id"))
+        return None
 
-    def read_events(self, limit: Optional[int] = None):
-        return list(self.read_jsonl(self.events_path, limit=limit))
+    def read_jsonl(self, path: Path, limit: Optional[int] = None, run_id: str | None = None) -> Iterable[Dict]:
+        rows = list(read_jsonl_tail(path, limit=limit))
+        if run_id is None:
+            return rows
+        return [row for row in rows if self._row_run_id(row) == run_id]
 
-    def read_market_samples(self, limit: Optional[int] = None):
-        return list(self.read_jsonl(self.market_samples_path, limit=limit))
+    def read_events(self, limit: Optional[int] = None, run_id: str | None = None):
+        return list(self.read_jsonl(self.events_path, limit=limit, run_id=run_id))
+
+    def read_market_samples(self, limit: Optional[int] = None, run_id: str | None = None):
+        return list(self.read_jsonl(self.market_samples_path, limit=limit, run_id=run_id))
 
     @staticmethod
     def _render_latest_status_text(status: Dict) -> str:

@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from book_quality import assess_book_quality
 from market_data import OrderBook
+from tradeability_policy import assess_tradeability
 
 
 @dataclass
@@ -27,15 +27,11 @@ class Signal:
 
 class OpeningRangeBreakout:
     def __init__(self, config: dict):
+        self.config = config
         params = config["strategies"]["opening_range"]
-        filters = config.get("filters", {})
         self.tick_count = params.get("opening_range_ticks", 3)
         self.breakout_pct = params.get("breakout_pct", 0.02)
         self.min_volume = params.get("min_volume", 5000)
-        self.max_book_spread_bps = filters.get("max_book_spread_bps", 500)
-        self.min_top_depth = filters.get("min_top_depth", 2)
-        self.min_top_notional = filters.get("min_top_notional", 0.5)
-        self.max_depth_ratio = filters.get("max_depth_ratio", 12)
         # Per-slot state: market_id -> {high, low, ticks, broken}
         self.opening_ranges = {}
 
@@ -68,13 +64,7 @@ class OpeningRangeBreakout:
         if volume < self.min_volume:
             return None
 
-        quality = assess_book_quality(
-            orderbook, primary_outcome,
-            max_spread_bps=self.max_book_spread_bps,
-            min_top_depth=self.min_top_depth,
-            min_top_notional=self.min_top_notional,
-            max_depth_ratio=self.max_depth_ratio,
-        )
+        quality = assess_tradeability(self.config, "opening_range", orderbook, primary_outcome)
         if not quality.is_tradeable:
             return None
 

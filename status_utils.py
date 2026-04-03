@@ -42,6 +42,9 @@ def render_status_text(runtime_dir: str | Path) -> str:
     heartbeat_age = payload.get("heartbeat_age_seconds")
     heartbeat_text = "n/a" if heartbeat_age is None else f"{heartbeat_age:.1f}s"
 
+    baseline = status.get("baseline_strategy")
+    research_candidates = status.get("research_candidates", []) or []
+
     lines = [
         f"Runtime dir: {payload['runtime_dir']}",
         f"Run id: {status.get('run_id', 'unknown')}",
@@ -54,6 +57,11 @@ def render_status_text(runtime_dir: str | Path) -> str:
         f"Exposure: gross={float(risk.get('total_gross_exposure', 0.0)):.4f} position={float(risk.get('gross_position_exposure', 0.0)):.4f} open_orders={float(risk.get('gross_open_order_exposure', 0.0)):.4f}",
         f"Resolved: {status.get('resolved_trade_count', 0)} | Win rate: {float(status.get('win_rate', 0.0)):.2%}",
     ]
+
+    if baseline:
+        lines.append(f"Baseline strategy: {baseline}")
+    if research_candidates:
+        lines.append(f"Research candidates: {', '.join(str(item) for item in research_candidates)}")
 
     if strategy_metrics:
         lines.append("Strategy metrics:")

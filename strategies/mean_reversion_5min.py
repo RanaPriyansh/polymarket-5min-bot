@@ -9,8 +9,9 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from book_quality import BookQuality, assess_book_quality
+from book_quality import BookQuality
 from market_data import OrderBook, PolymarketData
+from tradeability_policy import assess_tradeability
 
 
 @dataclass
@@ -27,8 +28,8 @@ class Signal:
 
 class MeanReversion5Min:
     def __init__(self, config: dict):
+        self.config = config
         params = config["strategies"]["mean_reversion_5min"]
-        filters = config.get("filters", {})
         self.ema_period = params["ema_period"]
         self.ema_period_by_interval = {
             5: params.get("ema_period_5m", params["ema_period"]),
@@ -39,10 +40,6 @@ class MeanReversion5Min:
         self.kelly_fraction = params["kelly_fraction"]
         self.timeframes = params["timeframes"]
         self.min_volume = params["min_volume"]
-        self.max_book_spread_bps = filters.get("max_book_spread_bps", 500)
-        self.min_top_depth = filters.get("min_top_depth", 2)
-        self.min_top_notional = filters.get("min_top_notional", 0.5)
-        self.max_depth_ratio = filters.get("max_depth_ratio", 12)
         self.price_history = {}
         self.volatility_estimate = 0.05
 
@@ -71,14 +68,7 @@ class MeanReversion5Min:
         return (current_price - ema) / ema
 
     def assess_book(self, orderbook: OrderBook, outcome: str = "YES") -> BookQuality:
-        return assess_book_quality(
-            orderbook,
-            outcome,
-            max_spread_bps=self.max_book_spread_bps,
-            min_top_depth=self.min_top_depth,
-            min_top_notional=self.min_top_notional,
-            max_depth_ratio=self.max_depth_ratio,
-        )
+        return assess_tradeability(self.config, "mean_reversion_5min", orderbook, outcome)
 
     def generate_signal(self, market_id: str, outcome: str, price: float,
                         orderbook: OrderBook, volume: float, interval_minutes: Optional[int] = None) -> Optional[Signal]:

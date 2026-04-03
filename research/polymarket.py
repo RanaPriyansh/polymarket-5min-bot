@@ -18,20 +18,24 @@ from runtime_telemetry import RuntimeTelemetry
 
 
 class PolymarketRuntimeResearchAdapter(ResearchAdapter):
-    def __init__(self, runtime_dir: str | Path, sample_limit: int = 200):
+    def __init__(self, runtime_dir: str | Path, sample_limit: int = 200, run_id: str | None = None):
         self.telemetry = RuntimeTelemetry(runtime_dir)
         self.sample_limit = sample_limit
+        self.run_id = run_id or self.telemetry.current_run_id()
 
     def run(self) -> ResearchCycleResult:
         status = self.telemetry.read_status()
         metrics = self.telemetry.read_strategy_metrics()
-        events = self.telemetry.read_events(limit=500)
-        samples = self.telemetry.read_market_samples(limit=self.sample_limit)
+        events = self.telemetry.read_events(limit=500, run_id=self.run_id)
+        samples = self.telemetry.read_market_samples(limit=self.sample_limit, run_id=self.run_id)
 
         hypotheses: List[ResearchHypothesis] = []
         experiments: List[ResearchExperimentResult] = []
         insights: List[ResearchInsight] = []
         next_actions: List[str] = []
+
+        baseline_strategy = status.get("baseline_strategy")
+        research_candidates = status.get("research_candidates", []) or []
 
         family_summaries = self._family_summaries(metrics)
         skip_counter = self._skip_counter(samples)
@@ -77,6 +81,22 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
                 )
             )
             next_actions.append(summary["action"])
+
+        if baseline_strategy or research_candidates:
+            insights.append(
+                ResearchInsight(
+                    title="Strategy governance state",
+                    observation=(
+                        f"Baseline={baseline_strategy or 'unset'}; research_candidates={', '.join(research_candidates) if research_candidates else 'none'}."
+                    ),
+                    recommendation="Keep capital and runtime attention on the baseline until a candidate earns promotion with settled paper evidence.",
+                    confidence=0.9,
+                    evidence={
+                        "baseline_strategy": baseline_strategy,
+                        "research_candidates": list(research_candidates),
+                    },
+                )
+            )
 
         if skip_counter:
             top_reason, top_count = skip_counter.most_common(1)[0]
@@ -190,8 +210,9 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
         insights.sort(key=lambda insight: insight.confidence, reverse=True)
         next_actions = self._unique(next_actions)
         top_recommendation = insights[0].recommendation if insights else None
+        scope_text = self.run_id or "all-runs"
         summary = (
-            f"Analyzed runtime artifacts from {self.telemetry.runtime_dir}. "
+            f"Analyzed runtime artifacts from {self.telemetry.runtime_dir} for run scope {scope_text}. "
             f"Loaded {len(metrics)} families, {len(events)} events, {len(samples)} market samples, {len(fill_events)} fills."
         )
         return ResearchCycleResult(
@@ -215,6 +236,9 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
                     "families": list(metrics.keys()),
                     "fetched_markets": status.get("fetched_markets", 0),
                     "processed_markets": status.get("processed_markets", 0),
+                    "run_scope": scope_text,
+                    "baseline_strategy": baseline_strategy,
+                    "research_candidates": list(research_candidates),
                 },
             ),
             hypotheses=hypotheses,
