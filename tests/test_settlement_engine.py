@@ -140,13 +140,18 @@ class SettlementEngineTests(unittest.TestCase):
         projection_one = replay_ledger(events)
         projection_two = replay_ledger(events)
 
-        position = projection_one.positions[("toxicity_mm", "m1", "Up")]
-        self.assertEqual(position["quantity"], 0.0)
-        self.assertAlmostEqual(position["realized_pnl"], -4.0)
+        # Settled positions are removed from the projection (not left as zero-qty)
+        self.assertNotIn(("toxicity_mm", "m1", "Up"), projection_one.positions,
+                         "Settled positions must be purged from replay projection")
+        # PnL was applied by _settle_positions_for_slot during replay
         self.assertEqual(projection_one.pending_slots, {})
         self.assertEqual(projection_one.settled_slots["btc:5:100"]["winning_outcome"], "Down")
         self.assertEqual(projection_one.positions, projection_two.positions)
         self.assertEqual(projection_one.realized_pnl_total, projection_two.realized_pnl_total)
+        # Resolved count is 1 (one position settled)
+        self.assertEqual(projection_one.resolved_trade_count, 1)
+        self.assertEqual(projection_one.win_count, 0)
+        self.assertEqual(projection_one.loss_count, 1)
 
 
 if __name__ == "__main__":

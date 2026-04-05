@@ -886,7 +886,11 @@ class PolymarketExecutor:
                 settlement_events.append(event)
                 self.latest_settlement = event
         else:
-            # Flat at expiry: emit slot_closed lifecycle event (no PnL)
+            # Flat at expiry: emit slot_closed lifecycle event (no PnL).
+            # This is a lifecycle observability event — it does NOT count as a
+            # resolved trade, win, or loss. Resolved trades are only counted
+            # when actual positions are settled. The slot lets operators know
+            # a market expired and was processed, even with zero exposure.
             settlement_events.append({
                 "event_type": "slot_closed",
                 "slot_id": market["slot_id"],
@@ -896,7 +900,6 @@ class PolymarketExecutor:
                 "settled_ts": settled_ts,
                 "position_count": 0,
             })
-            self.resolved_trade_count += 1
 
         if market["slot_id"] in self.signal_slots:
             self.signal_slots[market["slot_id"]].status = "settled"

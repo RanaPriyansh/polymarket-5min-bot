@@ -120,16 +120,18 @@ def _apply_slot_event(projection: ReplayProjection, event: LedgerEvent) -> None:
         settled_payload = dict(event.payload)
         projection.settled_slots[slot_id] = settled_payload
         projection.latest_settlement = {"slot_id": slot_id, **settled_payload}
-        _settle_positions_for_slot(projection, slot_id, settled_payload, event)
-        # If no positions exist for this market, still count this as a resolved
-        # trade (zero-exposure market at expiry — lifecycle closure).
+
         market_id = settled_payload.get("market_id")
-        has_positions = any(
-            p.get("market_id") == market_id
-            for p in projection.positions.values()
-        )
-        if not has_positions:
-            projection.resolved_trade_count += 1
+
+        # Settle positions that still have non-zero quantity at this point.
+        _settle_positions_for_slot(projection, slot_id, settled_payload, event)
+
+        # Remove ALL positions for this market after settlement.
+        # This ensures open_positions counts reflect only truly open (unresolved)
+        # positions and not stale zero-quantity entries.
+        for k in list(projection.positions.keys()):
+            if projection.positions[k].get("market_id") == market_id:
+                del projection.positions[k]
 
 
 def _apply_position_fill(projection: ReplayProjection, payload: dict[str, Any]) -> float:
