@@ -86,9 +86,10 @@ class PolymarketExecutor:
         self.pending_resolution: Dict[str, Dict] = {}
         self.markets_seen_for_settlement: set = set()
         self.settled_slots: set = set()
-        self.resolved_trade_count = 0
-        self.win_count = 0
-        self.loss_count = 0
+        self.resolved_trade_count: int = 0
+        self.breakeven_count: int = 0
+        self.win_count: int = 0
+        self.loss_count: int = 0
         self.latest_settlement: Optional[Dict] = None
         ledger_path = execution_cfg.get("ledger_db_path")
         self.ledger = ledger or (SQLiteLedger(Path(ledger_path)) if ledger_path else None)
@@ -172,6 +173,7 @@ class PolymarketExecutor:
         }
         self.realized_pnl_total = float(projection.realized_pnl_total)
         self.resolved_trade_count = int(projection.resolved_trade_count)
+        self.breakeven_count = int(getattr(projection, "breakeven_count", 0))
         self.win_count = int(projection.win_count)
         self.loss_count = int(projection.loss_count)
         settled = sorted(
@@ -865,10 +867,14 @@ class PolymarketExecutor:
                     price=payout,
                 )
                 self.resolved_trade_count += 1
-                if realized >= 0:
+                
+                # Explicit contract: win/loss/breakeven classification
+                if realized > 1e-6:
                     self.win_count += 1
-                else:
+                elif realized < -1e-6:
                     self.loss_count += 1
+                else:
+                    self.breakeven_count += 1
                 event = {
                     "event_type": "market.settled",
                     "slot_id": market["slot_id"],
@@ -887,10 +893,18 @@ class PolymarketExecutor:
                 self.latest_settlement = event
         else:
             # Flat at expiry: emit slot_closed lifecycle event (no PnL).
-            # This is a lifecycle observability event — it does NOT count as a
-            # resolved trade, win, or loss. Resolved trades are only counted
-            # when actual positions are settled. The slot lets operators know
-            # a market expired and was processed, even with zero exposure.
+            # This does NOT count as a resolved trade, win, or loss.
+            closed_evt = self.settlement_engine.slot_closed_event(
+                slot_id=market["slot_id"],
+                market_id=market["id"],
+                market_slug=market["slug"],
+                winning_outcome=winning_outcome,
+                settled_ts=settled_ts,  # use method param, not now_ts
+                run_id=self.run_id,
+                sequence_num=self._next_sequence("market_slot", market["slot_id"]),
+                correlation_id=market["slot_id"],
+            )
+            self._persist_events(closed_evt)
             settlement_events.append({
                 "event_type": "slot_closed",
                 "slot_id": market["slot_id"],
@@ -901,10 +915,19 @@ class PolymarketExecutor:
                 "position_count": 0,
             })
 
+        # Clear positions for this market from in-memory tracking
+        self._clear_market_positions(market["id"])
+
         if market["slot_id"] in self.signal_slots:
             self.signal_slots[market["slot_id"]].status = "settled"
             del self.signal_slots[market["slot_id"]]
         return settlement_events
+
+    def _clear_market_positions(self, market_id: str) -> None:
+        """Remove all in-memory positions for a given market after settlement."""
+        for key in list(self.positions.keys()):
+            if key[1] == market_id:
+                del self.positions[key]
 
     async def process_pending_resolutions(self, now_ts: Optional[float] = None) -> List[Dict]:
         now_ts = now_ts or time.time()

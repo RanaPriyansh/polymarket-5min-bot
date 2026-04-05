@@ -10,6 +10,22 @@ from ledger import LedgerEvent
 
 @dataclass
 class ReplayProjection:
+    """Projected state from ledger events.
+
+    CASH vs EQUITY:
+      starting_bankroll:     Initial cash before any trading (set at construction).
+      cash_balance:          starting_bankroll + realized_pnl_total.
+      unrealized_pnl_total:  MTM of open positions (bid/ask mark).
+      equity:                cash_balance + unrealized_pnl_total.
+
+    RESOLUTION ACCOUNTING:
+      resolved_trade_count:  Position settlements with realized != 0.
+      breakeven_count:       Position settlements with abs(realized) <= 1e-6.
+      win_count:             realized > 0 (breakeven excluded).
+      loss_count:            realized < 0 (breakeven excluded).
+      win_rate:              win_count / max(win_count + loss_count, 1).
+                             Breakevens excluded from denominator.
+    """
     orders: dict[str, dict[str, Any]] = field(default_factory=dict)
     open_orders: set[str] = field(default_factory=set)
     pending_slots: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -17,11 +33,38 @@ class ReplayProjection:
     positions: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
     realized_pnl_total: float = 0.0
     resolved_trade_count: int = 0
+    breakeven_count: int = 0
     win_count: int = 0
     loss_count: int = 0
     latest_settlement: dict[str, Any] | None = None
     realized_pnl_timeline: list[dict[str, float]] = field(default_factory=list)
     exposure: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def starting_bankroll(self) -> float:
+        return self.exposure.get("starting_bankroll", 500.0)
+
+    @property
+    def cash_balance(self) -> float:
+        return self.starting_bankroll + self.realized_pnl_total
+
+    @property
+    def unrealized_pnl_total(self) -> float:
+        total = 0.0
+        for pos in self.positions.values():
+            qty = float(pos.get("quantity", 0.0))
+            avg = float(pos.get("average_price", 0.0))
+            mtm = float(pos.get("mtm_price", 0.0))
+            if abs(qty) > 1e-9:
+                if qty > 0:
+                    total += (mtm - avg) * qty if mtm > 0 else -avg * qty
+                else:
+                    total += (avg - mtm) * abs(qty) if mtm > 0 else avg * abs(qty)
+        return total
+
+    @property
+    def equity(self) -> float:
+        return self.cash_balance + self.unrealized_pnl_total
 
 
 ORDER_TERMINAL_STATUSES = {"cancelled", "rejected", "expired", "filled"}
@@ -132,6 +175,13 @@ def _apply_slot_event(projection: ReplayProjection, event: LedgerEvent) -> None:
         for k in list(projection.positions.keys()):
             if projection.positions[k].get("market_id") == market_id:
                 del projection.positions[k]
+        return
+
+    if event.event_type == "slot_closed":
+        # Flat-at-expiry lifecycle event — no positions to settle, just record
+        projection.pending_slots.pop(slot_id, None)
+        projection.settled_slots[slot_id] = dict(event.payload)
+        return
 
 
 def _apply_position_fill(projection: ReplayProjection, payload: dict[str, Any]) -> float:
@@ -189,10 +239,14 @@ def _settle_positions_for_slot(
         position["winning_outcome"] = winning_outcome
         projection.realized_pnl_total += realized
         projection.resolved_trade_count += 1
-        if realized >= 0:
+        
+        # Classify: win, loss, or breakeven (explicit contract)
+        if realized > 1e-6:
             projection.win_count += 1
-        else:
+        elif realized < -1e-6:
             projection.loss_count += 1
+        else:
+            projection.breakeven_count += 1
         _record_realized_event(projection, event, realized)
 
 
