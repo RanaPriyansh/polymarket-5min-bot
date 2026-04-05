@@ -839,43 +839,64 @@ class PolymarketExecutor:
         return state
 
     def _settle_market_positions(self, market: Dict, winning_outcome: str, settled_ts: float) -> List[Dict]:
+        """Apply settlement fills for any remaining positions and emit PnL events.
+        Also emits a slot_closed lifecycle event even when flat-at-expiry."""
         settlement_events: List[Dict] = []
-        for (family, market_id, outcome), position in list(self.positions.items()):
-            if market_id != market["id"] or position.quantity == 0:
-                continue
-            quantity_before = position.quantity
-            average_price = position.average_price
-            payout = 1.0 if outcome == winning_outcome else 0.0
-            side = "SELL" if quantity_before > 0 else "BUY"
-            realized = self._apply_fill(
-                strategy_family=family,
-                market_id=market_id,
-                outcome=outcome,
-                side=side,
-                size=abs(quantity_before),
-                price=payout,
-            )
-            self.resolved_trade_count += 1
-            if realized >= 0:
-                self.win_count += 1
-            else:
-                self.loss_count += 1
-            event = {
-                "event_type": "market.settled",
+        has_open_positions = False
+        for (family, market_id, _outcome), position in list(self.positions.items()):
+            if market_id == market["id"] and position.quantity != 0:
+                has_open_positions = True
+                break
+
+        if has_open_positions:
+            for (family, market_id, outcome), position in list(self.positions.items()):
+                if market_id != market["id"] or position.quantity == 0:
+                    continue
+                quantity_before = position.quantity
+                average_price = position.average_price
+                payout = 1.0 if outcome == winning_outcome else 0.0
+                side = "SELL" if quantity_before > 0 else "BUY"
+                realized = self._apply_fill(
+                    strategy_family=family,
+                    market_id=market_id,
+                    outcome=outcome,
+                    side=side,
+                    size=abs(quantity_before),
+                    price=payout,
+                )
+                self.resolved_trade_count += 1
+                if realized >= 0:
+                    self.win_count += 1
+                else:
+                    self.loss_count += 1
+                event = {
+                    "event_type": "market.settled",
+                    "slot_id": market["slot_id"],
+                    "market_id": market_id,
+                    "market_slug": market["slug"],
+                    "strategy_family": family,
+                    "outcome": outcome,
+                    "winning_outcome": winning_outcome,
+                    "quantity": quantity_before,
+                    "average_price": average_price,
+                    "payout": payout,
+                    "realized_pnl_delta": realized,
+                    "settled_ts": settled_ts,
+                }
+                settlement_events.append(event)
+                self.latest_settlement = event
+        else:
+            # Flat at expiry: emit slot_closed lifecycle event (no PnL)
+            settlement_events.append({
+                "event_type": "slot_closed",
                 "slot_id": market["slot_id"],
-                "market_id": market_id,
+                "market_id": market["id"],
                 "market_slug": market["slug"],
-                "strategy_family": family,
-                "outcome": outcome,
                 "winning_outcome": winning_outcome,
-                "quantity": quantity_before,
-                "average_price": average_price,
-                "payout": payout,
-                "realized_pnl_delta": realized,
                 "settled_ts": settled_ts,
-            }
-            settlement_events.append(event)
-            self.latest_settlement = event
+                "position_count": 0,
+            })
+            self.resolved_trade_count += 1
 
         if market["slot_id"] in self.signal_slots:
             self.signal_slots[market["slot_id"]].status = "settled"
