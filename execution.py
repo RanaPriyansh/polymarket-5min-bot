@@ -84,6 +84,8 @@ class PolymarketExecutor:
         self.market_registry: Dict[str, Dict] = {}
         self.signal_slots: Dict[str, SlotState] = {}
         self.pending_resolution: Dict[str, Dict] = {}
+        self.markets_seen_for_settlement: set = set()
+        self.settled_slots: set = set()
         self.resolved_trade_count = 0
         self.win_count = 0
         self.loss_count = 0
@@ -189,6 +191,10 @@ class PolymarketExecutor:
                 "slot_id": slot_id,
                 **payload,
             }
+        # Restore settled slots set to avoid re-settling after restart
+        self.settled_slots = set(projection.settled_slots.keys())
+        # Restore markets_seen_for_settlement from all known markets
+        self.markets_seen_for_settlement = set(self.market_registry.keys()) | self.settled_slots
         self._restore_market_registry_from_state()
         self._rebuild_signal_slots_from_orders()
 
@@ -404,6 +410,9 @@ class PolymarketExecutor:
 
     def register_market(self, market: Dict) -> None:
         self.market_registry[market["slot_id"]] = dict(market)
+        slot_id = market.get("slot_id")
+        if slot_id and slot_id not in self.settled_slots:
+            self.markets_seen_for_settlement.add(slot_id)
 
     def _market_for_order(self, order: Dict) -> Optional[Dict]:
         slot_id = order.get("slot_id")
@@ -876,7 +885,13 @@ class PolymarketExecutor:
     async def process_pending_resolutions(self, now_ts: Optional[float] = None) -> List[Dict]:
         now_ts = now_ts or time.time()
         events: List[Dict] = []
-        slot_ids = set(self.market_registry.keys()) | set(self.pending_resolution.keys())
+        # Track all slots that need resolution: expired markets we ever saw
+        expired_slots = {
+            slot_id for slot_id, market in self.market_registry.items()
+            if float(market.get("end_ts", 0.0)) <= now_ts
+            and slot_id not in self.settled_slots
+        }
+        slot_ids = expired_slots | set(self.pending_resolution.keys())
         for slot_id in sorted(slot_ids):
             market = self.market_registry.get(slot_id)
             if market is None:
@@ -891,15 +906,13 @@ class PolymarketExecutor:
                     "slug": market_slug,
                     "end_ts": 0.0,
                 }
-                self.market_registry[slot_id] = market
-            if float(market.get("end_ts", 0.0)) > now_ts and slot_id not in self.pending_resolution:
+            # Skip if already settled
+            if slot_id in self.settled_slots:
                 continue
 
             await self.cancel_market_orders(market["id"])
-            if not self._market_has_open_exposure(market["id"]):
-                self.pending_resolution.pop(slot_id, None)
-                continue
 
+            # If not yet in pending_resolution, add it
             state = self.pending_resolution.get(slot_id)
             if state is None:
                 state = self._update_pending_resolution(slot_id, now_ts)
@@ -914,7 +927,7 @@ class PolymarketExecutor:
                         next_poll_ts=state["next_poll_ts"],
                         first_pending_ts=state["first_pending_ts"],
                         delay_seconds=state["delay_seconds"],
-                        deferred=state["deferred"],
+                        deferred=state.get("deferred", False),
                         correlation_id=slot_id,
                     )
                 )
@@ -924,7 +937,7 @@ class PolymarketExecutor:
                     "market_id": market["id"],
                     "market_slug": market["slug"],
                     "next_poll_ts": state["next_poll_ts"],
-                    "deferred": state["deferred"],
+                    "deferred": state.get("deferred", False),
                 })
 
             if now_ts < state["next_poll_ts"]:
@@ -952,7 +965,7 @@ class PolymarketExecutor:
                         next_poll_ts=state["next_poll_ts"],
                         first_pending_ts=state["first_pending_ts"],
                         delay_seconds=state["delay_seconds"],
-                        deferred=state["deferred"],
+                        deferred=state.get("deferred", False),
                         correlation_id=slot_id,
                     )
                 )
@@ -962,10 +975,12 @@ class PolymarketExecutor:
                     "market_id": refreshed_market["id"],
                     "market_slug": refreshed_market["slug"],
                     "next_poll_ts": state["next_poll_ts"],
-                    "deferred": state["deferred"],
+                    "deferred": state.get("deferred", False),
                 })
                 continue
 
+            # Market is closed with a winning outcome -- settle it
+            self.settled_slots.add(slot_id)
             self.pending_resolution.pop(slot_id, None)
             events.extend(self._settle_market_positions(refreshed_market, winning_outcome, now_ts))
             self._persist_events(
@@ -980,6 +995,13 @@ class PolymarketExecutor:
                     correlation_id=slot_id,
                 )
             )
+            events.append({
+                "event_type": "market.settled",
+                "slot_id": slot_id,
+                "market_id": refreshed_market["id"],
+                "winning_outcome": winning_outcome,
+            })
+            logger.info("Settled %s: winning=%s", slot_id, winning_outcome)
         return events
 
     def get_family_metrics(self) -> Dict[str, Dict]:
