@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from book_quality import assess_book_quality
 from market_data import OrderBook
+from tradeability_policy import assess_tradeability
 
 
 @dataclass
@@ -27,15 +27,11 @@ class Signal:
 
 class OpeningRangeBreakout:
     def __init__(self, config: dict):
+        self.config = config
         params = config["strategies"]["opening_range"]
-        filters = config.get("filters", {})
         self.tick_count = params.get("opening_range_ticks", 3)
         self.breakout_pct = params.get("breakout_pct", 0.02)
         self.min_volume = params.get("min_volume", 5000)
-        self.max_book_spread_bps = filters.get("max_book_spread_bps", 500)
-        self.min_top_depth = filters.get("min_top_depth", 2)
-        self.min_top_notional = filters.get("min_top_notional", 0.5)
-        self.max_depth_ratio = filters.get("max_depth_ratio", 12)
         # Per-slot state: market_id -> {high, low, ticks, broken}
         self.opening_ranges = {}
 
@@ -43,8 +39,13 @@ class OpeningRangeBreakout:
         state = self.opening_ranges.setdefault(market_id, {
             "high": price, "low": price,
             "ticks": 0, "prices": [],
-            "broken": False, "broken_direction": None
+            "broken": False, "broken_direction": None,
+            "range_frozen": False,
         })
+        # Once the opening range is frozen (after initial tick_count), stop evolving it.
+        if state["range_frozen"]:
+            return
+
         state["ticks"] += 1
         state["prices"].append(price)
         state["high"] = max(state["high"], price)
@@ -53,19 +54,17 @@ class OpeningRangeBreakout:
         if len(state["prices"]) > 100:
             state["prices"] = state["prices"][-100:]
 
+        # Freeze the range once enough ticks have been collected.
+        if state["ticks"] >= self.tick_count:
+            state["range_frozen"] = True
+
     def generate_signal(self, market_id: str, primary_outcome: str,
                        price: float, orderbook: OrderBook,
                        volume: float, slot_id: str = "") -> Optional[Signal]:
         if volume < self.min_volume:
             return None
 
-        quality = assess_book_quality(
-            orderbook, primary_outcome,
-            max_spread_bps=self.max_book_spread_bps,
-            min_top_depth=self.min_top_depth,
-            min_top_notional=self.min_top_notional,
-            max_depth_ratio=self.max_depth_ratio,
-        )
+        quality = assess_tradeability(self.config, "opening_range", orderbook, primary_outcome)
         if not quality.is_tradeable:
             return None
 

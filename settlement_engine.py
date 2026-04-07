@@ -85,6 +85,45 @@ class SettlementEngine:
             },
         )
 
+    def slot_closed_event(
+        self,
+        *,
+        event_id: str | None = None,
+        slot_id: str,
+        market_id: str,
+        market_slug: str | None,
+        winning_outcome: str,
+        settled_ts: float,
+        run_id: str,
+        sequence_num: int,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+        schema_version: int = 1,
+    ) -> LedgerEvent:
+        """Flat-at-expiry lifecycle event — persisted to ledger for canonical truth."""
+        event_id = event_id or f"evt-{uuid.uuid4().hex}"
+        return LedgerEvent(
+            event_id=event_id,
+            stream="market_slot",
+            aggregate_id=slot_id,
+            sequence_num=sequence_num,
+            event_type="slot_closed",
+            event_ts=settled_ts,
+            recorded_ts=settled_ts,
+            run_id=run_id,
+            idempotency_key=f"closed:{slot_id}:{winning_outcome}:{_format_ts(settled_ts)}",
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+            schema_version=schema_version,
+            payload={
+                "market_id": market_id,
+                "market_slug": market_slug,
+                "winning_outcome": winning_outcome,
+                "settled_ts": settled_ts,
+                "position_count": 0,
+            },
+        )
+
 
 def _format_ts(value: float) -> str:
     if float(value).is_integer():

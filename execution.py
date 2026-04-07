@@ -84,9 +84,12 @@ class PolymarketExecutor:
         self.market_registry: Dict[str, Dict] = {}
         self.signal_slots: Dict[str, SlotState] = {}
         self.pending_resolution: Dict[str, Dict] = {}
-        self.resolved_trade_count = 0
-        self.win_count = 0
-        self.loss_count = 0
+        self.markets_seen_for_settlement: set = set()
+        self.settled_slots: set = set()
+        self.resolved_trade_count: int = 0
+        self.breakeven_count: int = 0
+        self.win_count: int = 0
+        self.loss_count: int = 0
         self.latest_settlement: Optional[Dict] = None
         ledger_path = execution_cfg.get("ledger_db_path")
         self.ledger = ledger or (SQLiteLedger(Path(ledger_path)) if ledger_path else None)
@@ -159,6 +162,8 @@ class PolymarketExecutor:
         self.pending_resolution = {
             slot_id: {
                 "slot_id": slot_id,
+                "market_id": payload.get("market_id"),
+                "market_slug": payload.get("market_slug"),
                 "first_pending_ts": payload.get("first_pending_ts", payload.get("next_poll_ts", 0.0)),
                 "next_poll_ts": payload.get("next_poll_ts", 0.0),
                 "delay_seconds": payload.get("delay_seconds", self.resolution_initial_poll_seconds),
@@ -168,6 +173,7 @@ class PolymarketExecutor:
         }
         self.realized_pnl_total = float(projection.realized_pnl_total)
         self.resolved_trade_count = int(projection.resolved_trade_count)
+        self.breakeven_count = int(getattr(projection, "breakeven_count", 0))
         self.win_count = int(projection.win_count)
         self.loss_count = int(projection.loss_count)
         settled = sorted(
@@ -187,7 +193,29 @@ class PolymarketExecutor:
                 "slot_id": slot_id,
                 **payload,
             }
+        # Restore settled slots set to avoid re-settling after restart
+        self.settled_slots = set(projection.settled_slots.keys())
+        # Restore markets_seen_for_settlement from all known markets
+        self.markets_seen_for_settlement = set(self.market_registry.keys()) | self.settled_slots
+        self._restore_market_registry_from_state()
         self._rebuild_signal_slots_from_orders()
+
+    def _restore_market_registry_from_state(self) -> None:
+        for order in self.orders.values():
+            slot_id = order.get("slot_id")
+            market_id = order.get("market_id")
+            if not slot_id or not market_id:
+                continue
+            market = self.market_registry.setdefault(slot_id, {"slot_id": slot_id, "id": market_id})
+            market.setdefault("slug", order.get("market_slug"))
+            market.setdefault("end_ts", float(order.get("market_end_ts", 0.0) or 0.0))
+        for slot_id, state in self.pending_resolution.items():
+            market_id = state.get("market_id")
+            if not slot_id or not market_id:
+                continue
+            market = self.market_registry.setdefault(slot_id, {"slot_id": slot_id, "id": market_id})
+            if state.get("market_slug"):
+                market.setdefault("slug", state.get("market_slug"))
 
     def _rebuild_signal_slots_from_orders(self) -> None:
         self.signal_slots = {}
@@ -384,6 +412,9 @@ class PolymarketExecutor:
 
     def register_market(self, market: Dict) -> None:
         self.market_registry[market["slot_id"]] = dict(market)
+        slot_id = market.get("slot_id")
+        if slot_id and slot_id not in self.settled_slots:
+            self.markets_seen_for_settlement.add(slot_id)
 
     def _market_for_order(self, order: Dict) -> Optional[Dict]:
         slot_id = order.get("slot_id")
@@ -810,61 +841,125 @@ class PolymarketExecutor:
         return state
 
     def _settle_market_positions(self, market: Dict, winning_outcome: str, settled_ts: float) -> List[Dict]:
+        """Apply settlement fills for any remaining positions and emit PnL events.
+        Also emits a slot_closed lifecycle event even when flat-at-expiry."""
         settlement_events: List[Dict] = []
-        for (family, market_id, outcome), position in list(self.positions.items()):
-            if market_id != market["id"] or position.quantity == 0:
-                continue
-            quantity_before = position.quantity
-            average_price = position.average_price
-            payout = 1.0 if outcome == winning_outcome else 0.0
-            side = "SELL" if quantity_before > 0 else "BUY"
-            realized = self._apply_fill(
-                strategy_family=family,
-                market_id=market_id,
-                outcome=outcome,
-                side=side,
-                size=abs(quantity_before),
-                price=payout,
+        has_open_positions = False
+        for (family, market_id, _outcome), position in list(self.positions.items()):
+            if market_id == market["id"] and position.quantity != 0:
+                has_open_positions = True
+                break
+
+        if has_open_positions:
+            for (family, market_id, outcome), position in list(self.positions.items()):
+                if market_id != market["id"] or position.quantity == 0:
+                    continue
+                quantity_before = position.quantity
+                average_price = position.average_price
+                payout = 1.0 if outcome == winning_outcome else 0.0
+                side = "SELL" if quantity_before > 0 else "BUY"
+                realized = self._apply_fill(
+                    strategy_family=family,
+                    market_id=market_id,
+                    outcome=outcome,
+                    side=side,
+                    size=abs(quantity_before),
+                    price=payout,
+                )
+                self.resolved_trade_count += 1
+                
+                # Explicit contract: win/loss/breakeven classification
+                if realized > 1e-6:
+                    self.win_count += 1
+                elif realized < -1e-6:
+                    self.loss_count += 1
+                else:
+                    self.breakeven_count += 1
+                event = {
+                    "event_type": "market.settled",
+                    "slot_id": market["slot_id"],
+                    "market_id": market_id,
+                    "market_slug": market["slug"],
+                    "strategy_family": family,
+                    "outcome": outcome,
+                    "winning_outcome": winning_outcome,
+                    "quantity": quantity_before,
+                    "average_price": average_price,
+                    "payout": payout,
+                    "realized_pnl_delta": realized,
+                    "settled_ts": settled_ts,
+                }
+                settlement_events.append(event)
+                self.latest_settlement = event
+        else:
+            # Flat at expiry: emit slot_closed lifecycle event (no PnL).
+            # This does NOT count as a resolved trade, win, or loss.
+            closed_evt = self.settlement_engine.slot_closed_event(
+                slot_id=market["slot_id"],
+                market_id=market["id"],
+                market_slug=market["slug"],
+                winning_outcome=winning_outcome,
+                settled_ts=settled_ts,  # use method param, not now_ts
+                run_id=self.run_id,
+                sequence_num=self._next_sequence("market_slot", market["slot_id"]),
+                correlation_id=market["slot_id"],
             )
-            self.resolved_trade_count += 1
-            if realized >= 0:
-                self.win_count += 1
-            else:
-                self.loss_count += 1
-            event = {
-                "event_type": "market.settled",
+            self._persist_events(closed_evt)
+            settlement_events.append({
+                "event_type": "slot_closed",
                 "slot_id": market["slot_id"],
-                "market_id": market_id,
+                "market_id": market["id"],
                 "market_slug": market["slug"],
-                "strategy_family": family,
-                "outcome": outcome,
                 "winning_outcome": winning_outcome,
-                "quantity": quantity_before,
-                "average_price": average_price,
-                "payout": payout,
-                "realized_pnl_delta": realized,
                 "settled_ts": settled_ts,
-            }
-            settlement_events.append(event)
-            self.latest_settlement = event
+                "position_count": 0,
+            })
+
+        # Clear positions for this market from in-memory tracking
+        self._clear_market_positions(market["id"])
 
         if market["slot_id"] in self.signal_slots:
             self.signal_slots[market["slot_id"]].status = "settled"
             del self.signal_slots[market["slot_id"]]
         return settlement_events
 
+    def _clear_market_positions(self, market_id: str) -> None:
+        """Remove all in-memory positions for a given market after settlement."""
+        for key in list(self.positions.keys()):
+            if key[1] == market_id:
+                del self.positions[key]
+
     async def process_pending_resolutions(self, now_ts: Optional[float] = None) -> List[Dict]:
         now_ts = now_ts or time.time()
         events: List[Dict] = []
-        for slot_id, market in list(self.market_registry.items()):
-            if market["end_ts"] > now_ts:
+        # Track all slots that need resolution: expired markets we ever saw
+        expired_slots = {
+            slot_id for slot_id, market in self.market_registry.items()
+            if float(market.get("end_ts", 0.0)) <= now_ts
+            and slot_id not in self.settled_slots
+        }
+        slot_ids = expired_slots | set(self.pending_resolution.keys())
+        for slot_id in sorted(slot_ids):
+            market = self.market_registry.get(slot_id)
+            if market is None:
+                state = self.pending_resolution.get(slot_id, {})
+                market_id = state.get("market_id")
+                market_slug = state.get("market_slug")
+                if not market_id or not market_slug:
+                    continue
+                market = {
+                    "slot_id": slot_id,
+                    "id": market_id,
+                    "slug": market_slug,
+                    "end_ts": 0.0,
+                }
+            # Skip if already settled
+            if slot_id in self.settled_slots:
                 continue
 
             await self.cancel_market_orders(market["id"])
-            if not self._market_has_open_exposure(market["id"]):
-                self.pending_resolution.pop(slot_id, None)
-                continue
 
+            # If not yet in pending_resolution, add it
             state = self.pending_resolution.get(slot_id)
             if state is None:
                 state = self._update_pending_resolution(slot_id, now_ts)
@@ -879,7 +974,7 @@ class PolymarketExecutor:
                         next_poll_ts=state["next_poll_ts"],
                         first_pending_ts=state["first_pending_ts"],
                         delay_seconds=state["delay_seconds"],
-                        deferred=state["deferred"],
+                        deferred=state.get("deferred", False),
                         correlation_id=slot_id,
                     )
                 )
@@ -889,7 +984,7 @@ class PolymarketExecutor:
                     "market_id": market["id"],
                     "market_slug": market["slug"],
                     "next_poll_ts": state["next_poll_ts"],
-                    "deferred": state["deferred"],
+                    "deferred": state.get("deferred", False),
                 })
 
             if now_ts < state["next_poll_ts"]:
@@ -917,7 +1012,7 @@ class PolymarketExecutor:
                         next_poll_ts=state["next_poll_ts"],
                         first_pending_ts=state["first_pending_ts"],
                         delay_seconds=state["delay_seconds"],
-                        deferred=state["deferred"],
+                        deferred=state.get("deferred", False),
                         correlation_id=slot_id,
                     )
                 )
@@ -927,10 +1022,12 @@ class PolymarketExecutor:
                     "market_id": refreshed_market["id"],
                     "market_slug": refreshed_market["slug"],
                     "next_poll_ts": state["next_poll_ts"],
-                    "deferred": state["deferred"],
+                    "deferred": state.get("deferred", False),
                 })
                 continue
 
+            # Market is closed with a winning outcome -- settle it
+            self.settled_slots.add(slot_id)
             self.pending_resolution.pop(slot_id, None)
             events.extend(self._settle_market_positions(refreshed_market, winning_outcome, now_ts))
             self._persist_events(
@@ -945,6 +1042,13 @@ class PolymarketExecutor:
                     correlation_id=slot_id,
                 )
             )
+            events.append({
+                "event_type": "market.settled",
+                "slot_id": slot_id,
+                "market_id": refreshed_market["id"],
+                "winning_outcome": winning_outcome,
+            })
+            logger.info("Settled %s: winning=%s", slot_id, winning_outcome)
         return events
 
     def get_family_metrics(self) -> Dict[str, Dict]:

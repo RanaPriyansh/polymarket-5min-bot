@@ -167,14 +167,26 @@ class PolymarketData:
                 return outcome
         return None
 
-    async def _fetch_json(self, url: str) -> Tuple[Any, aiohttp.typedefs.LooseHeaders]:
+    async def _fetch_json(self, url: str, max_retries: int = 3) -> Tuple[Any, aiohttp.typedefs.LooseHeaders]:
+        """Fetch JSON with DNS/connection retry resilience.
+        Transient network errors don't crash the bot -- they log and retry."""
         if not self.session:
             raise RuntimeError("PolymarketData session not initialized")
-        async with self.session.get(url) as resp:
-            payload = await resp.json(content_type=None)
-            if resp.status >= 400:
-                raise RuntimeError(f"Polymarket request failed ({resp.status}) for {url}: {payload}")
-            return payload, resp.headers
+
+        import socket
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                async with self.session.get(url) as resp:
+                    payload = await resp.json(content_type=None)
+                    if resp.status >= 400:
+                        raise RuntimeError(f"Polymarket request failed ({resp.status}) for {url}: {payload}")
+                    return payload, resp.headers
+            except (socket.gaierror, OSError, ConnectionError) as exc:
+                last_exc = exc
+                logger.warning("Network error fetching %s (attempt %d/%d): %s", url, attempt + 1, max_retries, exc)
+                await asyncio.sleep(2 ** attempt)
+        raise last_exc  # type: ignore[misc]
 
     def _normalize_market_payload(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         slug = raw.get("slug") or raw.get("ticker")

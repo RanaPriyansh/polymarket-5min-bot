@@ -4,8 +4,6 @@ logging:
 polymarket:
   clob_api_url: https://clob.polymarket.com
   gamma_api_url: https://gamma-api.polymarket.com
-  private_key: YOUR_PRIVATE_KEY
-  wallet_address: YOUR_WALLET_ADDRESS
   assets:
   - btc
   - eth
@@ -32,11 +30,15 @@ execution:
   resolution_initial_poll_seconds: 10
   resolution_poll_cap_seconds: 300
 strategies:
+  # Only toxicity_mm is promoted to active. The others are research
+  # candidates — keep them wired and tested, but only enable them once
+  # runtime evidence earns promotion. See PLAN.md § strategy evolution.
   active:
+  - toxicity_mm
+  candidates:
   - mean_reversion_5min
   - opening_range
   - time_decay
-  - toxicity_mm
   mean_reversion_5min:
     deviation_threshold: 0.03
     ema_period: 20
@@ -67,6 +69,4 @@ strategies:
 runtime:
   dir: data/runtime
 telegram:
-  bot_token: 8169107053:AAFFe3pUZlbwUzFtuMUPVInjc8sgwmjbI9g
-  chat_id: "7364191237"
-  enabled: true
+  enabled: false

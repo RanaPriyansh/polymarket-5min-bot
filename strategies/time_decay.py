@@ -13,8 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from book_quality import assess_book_quality
 from market_data import OrderBook
+from tradeability_policy import assess_tradeability
 
 
 @dataclass  
@@ -31,15 +31,11 @@ class Signal:
 
 class TimeDecay:
     def __init__(self, config: dict):
+        self.config = config
         params = config["strategies"]["time_decay"]
-        filters = config.get("filters", {})
         self.min_seconds_left = params.get("min_seconds_left", 10)
         self.max_seconds_left = params.get("max_seconds_left", 60)
         self.min_price = params.get("min_price", 0.55)
-        self.max_book_spread_bps = filters.get("max_book_spread_bps", 500)
-        self.min_top_depth = filters.get("min_top_depth", 2)
-        self.min_top_notional = filters.get("min_top_notional", 0.5)
-        self.max_depth_ratio = filters.get("max_depth_ratio", 12)
 
     def generate_signal(self, market_id: str, market: dict, orderbook: OrderBook,
                        current_time: float) -> Optional[Signal]:
@@ -51,13 +47,7 @@ class TimeDecay:
         if seconds_left < self.min_seconds_left or seconds_left > self.max_seconds_left:
             return None
 
-        quality = assess_book_quality(
-            orderbook, orderbook.outcome_labels[0],
-            max_spread_bps=self.max_book_spread_bps,
-            min_top_depth=self.min_top_depth,
-            min_top_notional=self.min_top_notional,
-            max_depth_ratio=self.max_depth_ratio,
-        )
+        quality = assess_tradeability(self.config, "time_decay", orderbook, orderbook.outcome_labels[0])
         if not quality.is_tradeable:
             return None
 

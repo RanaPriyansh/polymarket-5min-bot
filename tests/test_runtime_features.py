@@ -85,6 +85,8 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
             loop = ResearchLoop(f"{tmpdir}/research")
             result = loop.run_cycle(PolymarketRuntimeResearchAdapter(tmpdir))
             self.assertEqual(result.source, "live-runtime-artifacts")
+            self.assertEqual(result.context.metadata["run_scope"], "paper-test")
+            self.assertIn("run scope paper-test", result.summary)
             self.assertTrue(any("runtime quality" in insight.title for insight in result.insights))
             report_path = f"{tmpdir}/research/{result.cycle_id}.json"
             with open(report_path, "r", encoding="utf-8") as fh:
@@ -109,6 +111,8 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
                 run_id="paper-test",
                 phase="running",
                 mode="paper",
+                baseline_strategy="toxicity_mm",
+                research_candidates=["mean_reversion_5min", "opening_range", "time_decay"],
                 loop_count=7,
                 fetched_markets=8,
                 processed_markets=5,
@@ -127,8 +131,12 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
                     "total_gross_exposure": 7.0,
                 },
             )
+            status = telemetry.read_status()
+            self.assertNotIn("strategy_metrics", status)
             rendered = render_status_text(tmpdir)
             self.assertIn("Run id: paper-test", rendered)
+            self.assertIn("Baseline strategy: toxicity_mm", rendered)
+            self.assertIn("Research candidates: mean_reversion_5min, opening_range, time_decay", rendered)
             self.assertIn("Strategy metrics:", rendered)
             self.assertIn("toxicity_mm", rendered)
             self.assertTrue(Path(tmpdir, "latest-status.txt").exists())

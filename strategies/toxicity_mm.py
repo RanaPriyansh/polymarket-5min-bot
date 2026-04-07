@@ -8,8 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from book_quality import BookQuality, assess_book_quality
+from book_quality import BookQuality
 from market_data import OrderBook, PolymarketData
+from tradeability_policy import assess_tradeability, tradeability_policy
 
 
 @dataclass
@@ -26,9 +27,9 @@ class MMQuote:
 
 class ToxicityMM:
     def __init__(self, config: dict):
+        self.config = config
         params = config["strategies"]["toxicity_mm"]
         execution_cfg = config.get("execution", {})
-        filters = config.get("filters", {})
         self.vpin_threshold = params["vpin_threshold"]
         self.spread_multiplier = params["spread_multiplier"]
         self.kelly_fraction = params["kelly_fraction"]
@@ -37,10 +38,6 @@ class ToxicityMM:
         self.paper_max_notional_usd = float(execution_cfg.get("mm_paper_max_notional_usd", 5.0))
         self.base_spread_bps = 5
         self.position_risk_limit = 0.1
-        self.max_book_spread_bps = filters.get("max_book_spread_bps", 500)
-        self.min_top_depth = filters.get("min_top_depth", 2)
-        self.min_top_notional = filters.get("min_top_notional", 0.5)
-        self.max_depth_ratio = filters.get("max_depth_ratio", 12)
         self.positions = {}
         self.recent_trades = []
 
@@ -50,19 +47,13 @@ class ToxicityMM:
         return (abs(yes_imb) + abs(no_imb)) / 2
 
     def assess_book(self, orderbook: OrderBook, outcome: str = "YES") -> BookQuality:
-        return assess_book_quality(
-            orderbook,
-            outcome,
-            max_spread_bps=self.max_book_spread_bps,
-            min_top_depth=self.min_top_depth,
-            min_top_notional=self.min_top_notional,
-            max_depth_ratio=self.max_depth_ratio,
-        )
+        return assess_tradeability(self.config, "toxicity_mm", orderbook, outcome)
 
     def get_optimal_spread(self, volatility_estimate: float, vpin: float, quality: BookQuality) -> float:
         base = self.base_spread_bps / 10000.0
         multiplier = self.spread_multiplier if vpin <= self.vpin_threshold else self.spread_multiplier * 2
-        spread_penalty = max(1.0, quality.spread_bps / max(self.max_book_spread_bps, 1.0))
+        policy = tradeability_policy(self.config, "toxicity_mm")
+        spread_penalty = max(1.0, quality.spread_bps / max(policy.max_spread_bps, 1.0))
         return base * multiplier * spread_penalty * (1 + volatility_estimate * 10)
 
     def generate_quotes(self, market_id: str, orderbook: OrderBook) -> Tuple[Optional[MMQuote], Optional[MMQuote], BookQuality]:

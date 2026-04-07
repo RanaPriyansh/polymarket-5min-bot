@@ -15,6 +15,7 @@ from typing import Dict, Iterable, List
 import click
 import yaml
 
+from baseline_evidence import build_baseline_evidence, render_baseline_evidence_text
 from research.loop import ResearchLoop
 from research.polymarket import PolymarketRuntimeResearchAdapter
 from runtime_telemetry import RuntimeTelemetry
@@ -79,11 +80,11 @@ def load_cfg() -> dict:
     return cfg
 
 
-def _emit_events(runtime: RuntimeTelemetry, events: Iterable[Dict]) -> None:
+def _emit_events(runtime: RuntimeTelemetry, events: Iterable[Dict], *, run_id: str | None = None) -> None:
     for event in events:
         payload = dict(event)
         event_type = payload.pop("event_type", "runtime.event")
-        runtime.append_event(event_type, payload)
+        runtime.append_event(event_type, payload, run_id=run_id)
 
 
 def _resolve_active_strategies(cfg: dict, strategies: str | None) -> List[str]:
@@ -107,6 +108,15 @@ def _active_slot_summary(markets: List[Dict]) -> List[Dict]:
     ]
 
 
+def _strategy_governance(cfg: dict, active_strategies: List[str]) -> Dict[str, object]:
+    candidates = [str(item).strip() for item in cfg.get("strategies", {}).get("candidates", []) if str(item).strip()]
+    baseline = active_strategies[0] if len(active_strategies) == 1 else None
+    return {
+        "baseline_strategy": baseline,
+        "research_candidates": candidates,
+    }
+
+
 def _enforce_clock_drift(drift_seconds: float) -> None:
     if drift_seconds > 5:
         logger.warning("Clock drift is %.2fs vs Polymarket API time", drift_seconds)
@@ -124,8 +134,8 @@ def _enforce_clock_drift(drift_seconds: float) -> None:
 @click.option("--sleep-seconds", type=int, default=15, help="Loop sleep duration")
 def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     """Run the trading bot in specified mode."""
-    from book_quality import assess_book_quality
     from execution import PolymarketExecutor
+    from tradeability_policy import assess_tradeability
     from market_data import PolymarketData
     from risk import RiskManager
     from strategies.mean_reversion_5min import MeanReversion5Min
@@ -139,15 +149,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     cfg = load_cfg()
     active_strategies = _resolve_active_strategies(cfg, strategies)
     cfg.setdefault("strategies", {})["active"] = active_strategies
-    filters = cfg.get("filters", {})
     initial_capital = float(cfg.get("execution", {}).get("paper_starting_bankroll", 500.0))
-
-    # Relax book-quality filters for paper mode so ToxicityMM can actually place quotes
-    if mode == "paper":
-        filters.setdefault("max_book_spread_bps", 1000)
-        filters.setdefault("min_top_depth", 5)
-        filters.setdefault("min_top_notional", 1)
-        filters.setdefault("max_depth_ratio", 30)
+    strategy_governance = _strategy_governance(cfg, active_strategies)
 
     click.echo(f"Starting bot in {mode} mode with strategies: {','.join(active_strategies)}")
     click.echo("Press Ctrl+C to stop.")
@@ -155,8 +158,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     async def main_loop():
         runtime = RuntimeTelemetry(runtime_dir)
         run_id = runtime.make_run_id(mode)
-        runtime.append_event("runtime.started", {"run_id": run_id, "mode": mode, "strategies": active_strategies})
-        runtime.update_status(run_id=run_id, phase="starting", mode=mode, strategies=active_strategies, loop_count=0)
+        runtime.append_event("runtime.started", {"run_id": run_id, "mode": mode, "strategies": active_strategies, **strategy_governance})
+        runtime.update_status(run_id=run_id, phase="starting", mode=mode, strategies=active_strategies, loop_count=0, **strategy_governance)
 
         async with PolymarketData(cfg) as md:
             startup = await md.smoke_check()
@@ -214,13 +217,11 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
 
                         orderbook = ob_or_exc
                         orderbooks_by_market[market_id] = orderbook
-                        book_quality = assess_book_quality(
+                        book_quality = assess_tradeability(
+                            cfg,
+                            "runtime_baseline",
                             orderbook,
                             primary_outcome,
-                            max_spread_bps=filters.get("max_book_spread_bps", 250),
-                            min_top_depth=filters.get("min_top_depth", 25),
-                            min_top_notional=filters.get("min_top_notional", 10),
-                            max_depth_ratio=filters.get("max_depth_ratio", 12),
                         )
                         runtime.append_market_sample({
                             "run_id": run_id,
@@ -280,7 +281,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                         f"SIGNAL: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{mid:.4f} ({signal.reason})"
                                     )
                                     result = await executor.execute_signal_trade(market, orderbook, signal)
-                                    _emit_events(runtime, result.get("events", []))
+                                    _emit_events(runtime, result.get("events", []), run_id=run_id)
 
                         if "opening_range" in active_strategies:
                             opening_range.update_price(market_id, mid, volume)
@@ -299,7 +300,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                         f"OPENING RANGE: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
                                     )
                                     result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="opening_range")
-                                    _emit_events(runtime, result.get("events", []))
+                                    _emit_events(runtime, result.get("events", []), run_id=run_id)
 
                         if "time_decay" in active_strategies:
                             signal = time_decay.generate_signal(market_id, market, orderbook, current_time=loop_now)
@@ -310,7 +311,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                         f"TIME DECAY: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
                                     )
                                     result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="time_decay")
-                                    _emit_events(runtime, result.get("events", []))
+                                    _emit_events(runtime, result.get("events", []), run_id=run_id)
 
                         if "toxicity_mm" in active_strategies:
                             quote_yes, _, quality = mm.generate_quotes(market_id, orderbook)
@@ -361,9 +362,9 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     "book_quality": quote_yes.book_quality,
                                 })
 
-                    _emit_events(runtime, [{**fill, "event_type": "order.filled"} for fill in fill_events])
+                    _emit_events(runtime, [{**fill, "event_type": "order.filled"} for fill in fill_events], run_id=run_id)
                     settlement_events = await executor.process_pending_resolutions(now_ts=time.time())
-                    _emit_events(runtime, settlement_events)
+                    _emit_events(runtime, settlement_events, run_id=run_id)
 
                     positions = await executor.refresh_positions()
                     strategy_metrics = executor.get_family_metrics()
@@ -393,8 +394,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         pending_resolution_slots=executor_snapshot["pending_resolution_slots"],
                         latest_settlement=executor_snapshot["latest_settlement"],
                         positions=positions,
-                        strategy_metrics=strategy_metrics,
                         risk=risk_report,
+                        **strategy_governance,
                     )
                     click.echo(
                         "Paper bankroll ${capital:.2f} | open={open} | resolved={resolved} | pending={pending}".format(
@@ -538,13 +539,34 @@ def health_cmd(runtime_dir, max_heartbeat_age):
         raise SystemExit(1)
 
 
+@cli.command(name="evidence")
+@click.option("--runtime-dir", default="data/runtime", help="Directory containing runtime artifacts")
+@click.option("--strategy-family", default="toxicity_mm", help="Strategy family to summarize")
+@click.option("--event-limit", default=5000, help="Max events to inspect for current run")
+@click.option("--sample-limit", default=5000, help="Max market samples to inspect for current run")
+def evidence_cmd(runtime_dir, strategy_family, event_limit, sample_limit):
+    """Render a baseline evidence packet from runtime artifacts and ledger history."""
+    payload = build_baseline_evidence(
+        runtime_dir,
+        strategy_family=strategy_family,
+        event_limit=event_limit,
+        sample_limit=sample_limit,
+    )
+    click.echo(render_baseline_evidence_text(payload))
+
+
 @cli.command()
 @click.option("--runtime-dir", default="data/runtime", help="Directory containing live runtime artifacts")
 @click.option("--artifact-dir", default="data/research", help="Directory to write research outputs")
 @click.option("--sample-limit", default=200, help="How many market samples to analyze")
 def research(runtime_dir, artifact_dir, sample_limit):
-    """Run autoresearch on live runtime artifacts, not just backtest CSVs."""
-    adapter = PolymarketRuntimeResearchAdapter(runtime_dir, sample_limit=sample_limit)
+    """Run autoresearch on live runtime artifacts, scoped to the current run by default."""
+    telemetry = RuntimeTelemetry(runtime_dir)
+    adapter = PolymarketRuntimeResearchAdapter(
+        runtime_dir,
+        sample_limit=sample_limit,
+        run_id=telemetry.current_run_id(),
+    )
     loop = ResearchLoop(artifact_dir)
     result = loop.run_cycle(adapter)
     click.echo(result.summary)
