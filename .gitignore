@@ -9,3 +9,6 @@ logs/
 .env
 .venv/
 deploy/systemd/*.bak
+*.db
+*.sqlite3
+*.sqlite
