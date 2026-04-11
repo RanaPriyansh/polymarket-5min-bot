@@ -43,7 +43,9 @@ class ToxicityMM:
 
     def calculate_vpin(self, orderbook: OrderBook, timeframe_seconds: int = 60) -> float:
         yes_imb = PolymarketData.calculate_imbalance(orderbook, orderbook.outcome_labels[0])
-        no_imb = PolymarketData.calculate_imbalance(orderbook, orderbook.outcome_labels[1])
+        # Guard: single-outcome market has no second label
+        no_label = orderbook.outcome_labels[1] if len(orderbook.outcome_labels) > 1 else orderbook.outcome_labels[0]
+        no_imb = PolymarketData.calculate_imbalance(orderbook, no_label)
         return (abs(yes_imb) + abs(no_imb)) / 2
 
     def assess_book(self, orderbook: OrderBook, outcome: str = "YES") -> BookQuality:
@@ -79,8 +81,7 @@ class ToxicityMM:
             return None, None, quality
 
         mid_yes = PolymarketData.mid_price(orderbook, primary_outcome)
-        mid_no = PolymarketData.mid_price(orderbook, orderbook.outcome_labels[1])
-        if mid_yes == 0 or mid_no == 0:
+        if mid_yes == 0:
             quality.reasons.append("missing_mid")
             quality.is_tradeable = False
             return None, None, quality
