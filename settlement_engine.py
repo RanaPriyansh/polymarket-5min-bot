@@ -62,6 +62,11 @@ class SettlementEngine:
         correlation_id: str | None = None,
         causation_id: str | None = None,
         schema_version: int = 1,
+        position_outcome: str | None = None,
+        position_size: float | None = None,
+        entry_price: float | None = None,
+        realized_pnl: float | None = None,
+        is_win: int | None = None,
     ) -> LedgerEvent:
         event_id = event_id or f"evt-{uuid.uuid4().hex}"
         return LedgerEvent(
@@ -82,6 +87,11 @@ class SettlementEngine:
                 "market_slug": market_slug,
                 "winning_outcome": winning_outcome,
                 "settled_ts": settled_ts,
+                "position_outcome": position_outcome,
+                "position_size": position_size,
+                "entry_price": entry_price,
+                "realized_pnl": realized_pnl,
+                "is_win": is_win,
             },
         )
 

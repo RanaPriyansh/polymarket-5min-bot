@@ -104,6 +104,28 @@ class ConservativeFillEngine:
         average_fill_price = (previous_notional + (fill_size * fill_price)) / new_filled
         status = "filled" if remaining_qty <= 1e-9 else "partially_filled"
 
+        # Compute time-to-expiry from slot_id pattern "asset:interval_minutes:slot_start_ts"
+        slot_id = order.get("slot_id")
+        fill_ts = float(observed_event.event_ts)
+        time_to_expiry_seconds = None
+        tte_bucket = None
+        if slot_id:
+            parts = slot_id.split(":")
+            if len(parts) == 3:
+                try:
+                    interval_minutes = int(parts[1])
+                    slot_start_ts = float(parts[2])
+                    slot_end_ts = slot_start_ts + interval_minutes * 60
+                    time_to_expiry_seconds = max(0.0, round(slot_end_ts - fill_ts, 1))
+                    tte_bucket = (
+                        "<60s" if time_to_expiry_seconds < 60 else
+                        "60-120s" if time_to_expiry_seconds < 120 else
+                        "120-300s" if time_to_expiry_seconds < 300 else
+                        ">300s"
+                    )
+                except (ValueError, IndexError):
+                    pass
+
         event_id = event_id or f"evt-{uuid.uuid4().hex}"
         return LedgerEvent(
             event_id=event_id,
@@ -120,7 +142,7 @@ class ConservativeFillEngine:
             schema_version=schema_version,
             payload={
                 "market_id": order["market_id"],
-                "slot_id": order.get("slot_id"),
+                "slot_id": slot_id,
                 "outcome": order["outcome"],
                 "side": order["side"].upper(),
                 "strategy_family": order.get("strategy_family", "unknown"),
@@ -131,6 +153,8 @@ class ConservativeFillEngine:
                 "average_fill_price": average_fill_price,
                 "status": status,
                 "observed_event_id": observed_event.event_id,
+                "time_to_expiry_seconds": time_to_expiry_seconds,
+                "tte_bucket": tte_bucket,
             },
         )
 

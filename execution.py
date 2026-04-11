@@ -1029,7 +1029,13 @@ class PolymarketExecutor:
             # Market is closed with a winning outcome -- settle it
             self.settled_slots.add(slot_id)
             self.pending_resolution.pop(slot_id, None)
-            events.extend(self._settle_market_positions(refreshed_market, winning_outcome, now_ts))
+            events_delta = self._settle_market_positions(refreshed_market, winning_outcome, now_ts)
+            events.extend(events_delta)
+            settlement_pos_events = [e for e in events_delta if e.get("event_type") == "market.settled"]
+            # Sum up PnL across all positions settled for this slot
+            total_realized_pnl = sum(e.get("realized_pnl_delta", 0.0) for e in settlement_pos_events)
+            # For slot_settled we record the primary position (first one) if any
+            primary_pos = settlement_pos_events[0] if settlement_pos_events else None
             self._persist_events(
                 self.settlement_engine.settled_event(
                     slot_id=slot_id,
@@ -1040,6 +1046,11 @@ class PolymarketExecutor:
                     run_id=self.run_id,
                     sequence_num=self._next_sequence("market_slot", slot_id),
                     correlation_id=slot_id,
+                    position_outcome=primary_pos["outcome"] if primary_pos else None,
+                    position_size=abs(primary_pos["quantity"]) if primary_pos else None,
+                    entry_price=primary_pos["average_price"] if primary_pos else None,
+                    realized_pnl=round(total_realized_pnl, 6) if settlement_pos_events else None,
+                    is_win=1 if total_realized_pnl > 1e-6 else (0 if settlement_pos_events else None),
                 )
             )
             events.append({
