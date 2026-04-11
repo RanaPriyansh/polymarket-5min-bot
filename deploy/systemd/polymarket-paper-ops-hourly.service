@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly operator summary and audit loop for Polymarket paper bot
+After=polymarket-paper-bot.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/obsidian-hermes-vault/projects/polymarket-5min-bot
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.env
+ExecStart=/bin/bash -lc '/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python scripts/ops_status.py --write && /root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python scripts/ops_evidence.py --write && /root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python scripts/ops_settlement_diagnostics.py --write && /root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python scripts/fill_markout_audit.py && /root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python scripts/settlement_latency_audit.py && /root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python scripts/reconcile_metrics_current.py && /root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python scripts/attribution_report.py && /root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python scripts/fill_markout_report.py'
+StandardOutput=journal
+StandardError=journal
