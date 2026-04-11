@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Protocol
 
+from research.gate import build_gate_inputs, compute_gate_state
+
 
 @dataclass
 class ResearchContext:
@@ -77,8 +79,53 @@ class ResearchLoop:
         self.latest_json_path = self.artifact_dir / "latest.json"
         self.latest_md_path = self.artifact_dir / "latest.md"
 
-    def run_cycle(self, adapter: ResearchAdapter) -> ResearchCycleResult:
+    def run_cycle(self, adapter: ResearchAdapter, *, runtime_dir: str | None = None) -> ResearchCycleResult:
+        # Contradiction-first gate check (AC-5, AC-9)
+        gate_state = "GREEN"
+        gate_reasons: List[str] = []
+        if runtime_dir is not None:
+            gate_inputs = build_gate_inputs(runtime_dir)
+            gate_state, gate_reasons = compute_gate_state(gate_inputs)
+
         result = adapter.run()
+
+        # Apply gate emission rules
+        if gate_state == "RED":
+            # Block all output — emit contradiction report only
+            result.experiments = []
+            result.hypotheses = []
+            result.top_recommendation = None
+            result.next_actions = [
+                f"[GATE RED] Fix contradictions before research can proceed: {'; '.join(gate_reasons)}"
+            ]
+            # Write contradiction report
+            contradiction_report = {
+                "gate_state": "RED",
+                "detected_ts": time.time(),
+                "cycle_id": result.cycle_id,
+                "contradictions": gate_reasons,
+            }
+            contradiction_path = self.artifact_dir / f"contradiction-{int(time.time())}.json"
+            try:
+                with open(contradiction_path, "w") as _f:
+                    json.dump(contradiction_report, _f, indent=2)
+            except Exception:
+                pass
+        elif gate_state == "YELLOW":
+            # Allow at most one hypothesis with confidence < 0.5
+            result.experiments = []
+            result.top_recommendation = None
+            if result.hypotheses:
+                h = result.hypotheses[0]
+                h.confidence = min(h.confidence, 0.45)
+                result.hypotheses = [h]
+            if result.insights:
+                result.insights[0].confidence = min(result.insights[0].confidence, 0.45)
+
+        # Attach gate_state to the result for downstream consumers
+        result.raw_context["gate_state"] = gate_state
+        result.raw_context["gate_reasons"] = gate_reasons
+
         payload = self._result_payload(result)
         markdown = self._to_markdown(result)
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import sys
 import time
 from pathlib import Path
@@ -127,6 +128,32 @@ def _enforce_clock_drift(drift_seconds: float) -> None:
         raise click.ClickException(f"Clock drift too large for interval markets: {drift_seconds:.2f}s")
 
 
+def _install_signal_shutdown(loop: asyncio.AbstractEventLoop, main_task: asyncio.Task, stop_context: dict) -> List[int]:
+    registered_signals: List[int] = []
+
+    def _request_shutdown(sig: int) -> None:
+        if stop_context.get("reason") == "completed":
+            stop_context["reason"] = f"signal_{signal.Signals(sig).name.lower()}"
+        click.echo(f"Received {signal.Signals(sig).name}; shutting down...")
+        main_task.cancel()
+
+    for sig in (signal.SIGTERM,):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown, sig)
+            registered_signals.append(sig)
+        except (NotImplementedError, RuntimeError):
+            logger.warning("Signal handlers unavailable for %s", signal.Signals(sig).name)
+    return registered_signals
+
+
+def _remove_signal_shutdown(loop: asyncio.AbstractEventLoop, registered_signals: Iterable[int]) -> None:
+    for sig in registered_signals:
+        try:
+            loop.remove_signal_handler(sig)
+        except (NotImplementedError, RuntimeError):
+            logger.debug("Unable to remove signal handler for %s", signal.Signals(sig).name)
+
+
 def _read_prior_bankroll(ledger_db_path: str) -> "float | None":
     """Read the most recent bankroll from risk_snapshot_recorded events in the ledger.
 
@@ -232,10 +259,16 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     click.echo("Press Ctrl+C to stop.")
 
     async def main_loop():
+        loop = asyncio.get_running_loop()
+        main_task = asyncio.current_task()
+        if main_task is None:
+            raise RuntimeError("main_loop must run inside an asyncio task")
+
         runtime = RuntimeTelemetry(runtime_dir)
         run_id = runtime.make_run_id(mode)
         stop_reason = "completed"
         stop_snapshot_dir: str | None = None
+        registered_signals = _install_signal_shutdown(loop, main_task, _stop_context)
 
         # AC-8: emit service_restart lineage event when a prior run exists in the ledger
         ledger_path = str(Path(runtime_dir) / "ledger.db")
@@ -689,7 +722,7 @@ def research(runtime_dir, artifact_dir, sample_limit):
         run_id=telemetry.current_run_id(),
     )
     loop = ResearchLoop(artifact_dir)
-    result = loop.run_cycle(adapter)
+    result = loop.run_cycle(adapter, runtime_dir=runtime_dir)
     click.echo(result.summary)
     for insight in result.insights:
         click.echo(f"- {insight.title}: {insight.recommendation} [{insight.confidence:.0%}]")
