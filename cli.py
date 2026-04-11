@@ -440,7 +440,23 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     _emit_events(runtime, result.get("events", []), run_id=run_id)
 
                         if "toxicity_mm" in active_strategies:
-                            quote_yes, _, quality = mm.generate_quotes(market_id, orderbook)
+                            # Choose quote outcome: prefer whichever side has less executor exposure.
+                            # If no position exists, alternate between Up/Down per loop to avoid pure directionality.
+                            primary_outcome = market["outcomes"][0]  # "Up"
+                            secondary_outcome = market["outcomes"][1] if len(market["outcomes"]) > 1 else primary_outcome  # "Down"
+
+                            qty_up = executor.get_position_quantity("toxicity_mm", market_id, primary_outcome)
+                            qty_dn = executor.get_position_quantity("toxicity_mm", market_id, secondary_outcome)
+
+                            # Quote the side with less absolute inventory; tie-break by loop parity
+                            if abs(qty_up) < abs(qty_dn):
+                                preferred_outcome = primary_outcome
+                            elif abs(qty_dn) < abs(qty_up):
+                                preferred_outcome = secondary_outcome
+                            else:
+                                preferred_outcome = primary_outcome if loop_count % 2 == 0 else secondary_outcome
+
+                            quote_yes, _, quality = mm.generate_quotes(market_id, orderbook, preferred_outcome=preferred_outcome)
                             if not quote_yes:
                                 executor.note_toxic_book_skip("toxicity_mm")
                                 runtime.append_event("quote.skipped", {
@@ -563,7 +579,11 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                 stop_reason = "keyboard_interrupt"
                 click.echo("Shutting down...")
                 runtime.append_event("runtime.interrupted", {"run_id": run_id})
+            except asyncio.CancelledError:
+                stop_reason = _stop_context.get("reason", stop_reason)
+                runtime.append_event("runtime.interrupted", {"run_id": run_id, "signal": stop_reason})
             finally:
+                _remove_signal_shutdown(loop, registered_signals)
                 runtime.update_status(run_id=run_id, phase="stopped", mode=mode, loop_count=loop_count, stop_reason=stop_reason)
                 runtime.append_event(
                     "runtime.stopped",

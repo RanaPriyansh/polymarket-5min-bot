@@ -817,6 +817,10 @@ class PolymarketExecutor:
             if family == strategy_family and candidate_market_id == market_id
         )
 
+    def get_position_quantity(self, strategy_family: str, market_id: str, outcome: str) -> float:
+        pos = self.positions.get((strategy_family, market_id, outcome))
+        return pos.quantity if pos is not None else 0.0
+
     def _update_pending_resolution(self, slot_id: str, now_ts: float) -> Dict:
         state = self.pending_resolution.get(slot_id)
         if state is None:

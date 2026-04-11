@@ -56,8 +56,18 @@ class ToxicityMM:
         spread_penalty = max(1.0, quality.spread_bps / max(policy.max_spread_bps, 1.0))
         return base * multiplier * spread_penalty * (1 + volatility_estimate * 10)
 
-    def generate_quotes(self, market_id: str, orderbook: OrderBook) -> Tuple[Optional[MMQuote], Optional[MMQuote], BookQuality]:
-        primary_outcome = orderbook.outcome_labels[0]
+    def generate_quotes(
+        self,
+        market_id: str,
+        orderbook: OrderBook,
+        *,
+        preferred_outcome: str | None = None,
+    ) -> Tuple[Optional[MMQuote], Optional[MMQuote], BookQuality]:
+        # Pick outcome: use preferred_outcome if provided and valid, else default to outcome_labels[0]
+        if preferred_outcome is not None and preferred_outcome in orderbook.outcome_labels:
+            primary_outcome = preferred_outcome
+        else:
+            primary_outcome = orderbook.outcome_labels[0]
         quality = self.assess_book(orderbook, primary_outcome)
         if not quality.is_tradeable:
             return None, None, quality
