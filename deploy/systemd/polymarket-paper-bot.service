@@ -9,8 +9,10 @@ WorkingDirectory=/root/obsidian-hermes-vault/projects/polymarket-5min-bot
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.env
 ExecStart=/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python /root/obsidian-hermes-vault/projects/polymarket-5min-bot/cli.py run --mode paper --runtime-dir /root/obsidian-hermes-vault/projects/polymarket-5min-bot/data/runtime --sleep-seconds 5
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=15
+SuccessExitStatus=0
+RestartPreventExitStatus=2
 StandardOutput=journal
 StandardError=journal
 
