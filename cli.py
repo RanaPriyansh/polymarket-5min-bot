@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 from pathlib import Path
 from typing import Dict, Iterable, List
@@ -126,6 +127,74 @@ def _enforce_clock_drift(drift_seconds: float) -> None:
         raise click.ClickException(f"Clock drift too large for interval markets: {drift_seconds:.2f}s")
 
 
+def _read_prior_bankroll(ledger_db_path: str) -> "float | None":
+    """Read the most recent bankroll from risk_snapshot_recorded events in the ledger.
+
+    Returns the bankroll float if found, or None if the ledger does not exist or has no
+    risk_snapshot_recorded events yet.
+    """
+    import json
+    import sqlite3
+
+    from pathlib import Path as _Path
+
+    p = _Path(ledger_db_path)
+    if not p.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(p))
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT payload_json FROM ledger_events"
+            " WHERE event_type='risk_snapshot_recorded'"
+            " ORDER BY event_ts DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row is None:
+            return None
+        payload = json.loads(row[0])
+        bankroll = payload.get("capital")
+        if bankroll is not None:
+            return float(bankroll)
+        return None
+    except Exception:
+        return None
+
+
+def _detect_prior_run_id(ledger_db_path: str) -> "tuple[str | None, float | None]":
+    """Return (prior_run_id, prior_bankroll) from the most recent risk_snapshot_recorded event.
+
+    Returns (None, None) when the ledger does not exist or contains no such events.
+    """
+    import json
+    import sqlite3
+
+    from pathlib import Path as _Path
+
+    p = _Path(ledger_db_path)
+    if not p.exists():
+        return None, None
+    try:
+        conn = sqlite3.connect(str(p))
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT run_id, payload_json FROM ledger_events"
+            " WHERE event_type='risk_snapshot_recorded'"
+            " ORDER BY event_ts DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row is None:
+            return None, None
+        prior_run_id = row[0]
+        payload = json.loads(row[1])
+        prior_bankroll = float(payload.get("capital", 0.0))
+        return prior_run_id, prior_bankroll
+    except Exception:
+        return None, None
+
+
 @cli.command()
 @click.option("--mode", type=click.Choice(["backtest", "paper", "live"]), default="paper", help="Execution mode")
 @click.option("--strategies", default=None, help="Comma-separated active strategies (defaults to config.yaml strategies.active)")
@@ -150,6 +219,13 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     active_strategies = _resolve_active_strategies(cfg, strategies)
     cfg.setdefault("strategies", {})["active"] = active_strategies
     initial_capital = float(cfg.get("execution", {}).get("paper_starting_bankroll", 500.0))
+    ledger_db_path = str(Path(runtime_dir) / "ledger.db")
+    prior_bankroll = _read_prior_bankroll(ledger_db_path)
+    if prior_bankroll is not None:
+        click.echo(f"Bankroll continuity: resuming from prior bankroll ${prior_bankroll:.2f} (not resetting to config default)")
+        initial_capital = prior_bankroll
+    else:
+        click.echo(f"No prior ledger found — starting with config bankroll ${initial_capital:.2f}")
     strategy_governance = _strategy_governance(cfg, active_strategies)
 
     click.echo(f"Starting bot in {mode} mode with strategies: {','.join(active_strategies)}")
@@ -158,6 +234,23 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     async def main_loop():
         runtime = RuntimeTelemetry(runtime_dir)
         run_id = runtime.make_run_id(mode)
+        stop_reason = "completed"
+        stop_snapshot_dir: str | None = None
+
+        # AC-8: emit service_restart lineage event when a prior run exists in the ledger
+        ledger_path = str(Path(runtime_dir) / "ledger.db")
+        prior_run_id, prior_bankroll_at_stop = _detect_prior_run_id(ledger_path)
+        if prior_run_id and prior_run_id != run_id:
+            runtime.append_event("service_restart", {
+                "prior_run_id": prior_run_id,
+                "new_run_id": run_id,
+                "restart_ts": time.time(),
+                "trigger": "unknown",
+                "prior_bankroll": prior_bankroll_at_stop,
+                "new_bankroll": initial_capital,
+                "bankroll_delta": round(initial_capital - (prior_bankroll_at_stop or 0.0), 6),
+            })
+
         runtime.append_event("runtime.started", {"run_id": run_id, "mode": mode, "strategies": active_strategies, **strategy_governance})
         runtime.update_status(run_id=run_id, phase="starting", mode=mode, strategies=active_strategies, loop_count=0, **strategy_governance)
 
@@ -407,24 +500,52 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                     )
 
                     if risk_mgr.check_circuit_breakers(risk_report):
+                        stop_reason = "circuit_breaker"
                         runtime.append_event("runtime.circuit_breaker", {"run_id": run_id, "risk": risk_report})
+                        runtime.update_status(
+                            run_id=run_id,
+                            phase="stopping",
+                            mode=mode,
+                            loop_count=loop_count,
+                            stop_reason=stop_reason,
+                            risk=risk_report,
+                        )
+                        evidence_manifest = runtime.preserve_run_evidence(trigger=stop_reason, run_id=run_id)
+                        stop_snapshot_dir = str(evidence_manifest["snapshot_dir"])
+                        runtime.append_event(
+                            "runtime.evidence_preserved",
+                            {"run_id": run_id, "trigger": stop_reason, "snapshot_dir": stop_snapshot_dir},
+                        )
+                        click.echo(f"Preserved stop evidence at {stop_snapshot_dir}")
                         click.echo("CIRCUIT BREAKER TRIGGERED — stopping trading")
                         break
 
                     if max_loops and loop_count >= max_loops:
+                        stop_reason = "max_loops"
                         runtime.append_event("runtime.max_loops_reached", {"run_id": run_id, "max_loops": max_loops})
                         break
 
                     await asyncio.sleep(sleep_seconds)
             except KeyboardInterrupt:
+                stop_reason = "keyboard_interrupt"
                 click.echo("Shutting down...")
                 runtime.append_event("runtime.interrupted", {"run_id": run_id})
             finally:
-                runtime.update_status(run_id=run_id, phase="stopped", mode=mode, loop_count=loop_count)
-                runtime.append_event("runtime.stopped", {"run_id": run_id, "loop_count": loop_count})
+                runtime.update_status(run_id=run_id, phase="stopped", mode=mode, loop_count=loop_count, stop_reason=stop_reason)
+                runtime.append_event(
+                    "runtime.stopped",
+                    {"run_id": run_id, "loop_count": loop_count, "stop_reason": stop_reason, "snapshot_dir": stop_snapshot_dir},
+                )
                 await executor.__aexit__(None, None, None)
+                _stop_context["reason"] = stop_reason  # AC-2: surface stop_reason to outer scope
 
+    _stop_context: dict = {"reason": "completed"}
     asyncio.run(main_loop())
+
+    # AC-2: circuit breaker must exit with code 2 so systemd RestartPreventExitStatus=2 suppresses restart
+    if _stop_context["reason"] == "circuit_breaker":
+        click.echo("Exiting with code 2 (circuit_breaker) — service will not auto-restart")
+        sys.exit(2)
 
 
 @cli.command()
