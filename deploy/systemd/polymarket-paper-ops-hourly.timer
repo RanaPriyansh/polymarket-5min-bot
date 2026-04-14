@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly operator summary and audit loop for Polymarket paper bot
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=polymarket-paper-ops-hourly.service
+
+[Install]
+WantedBy=timers.target

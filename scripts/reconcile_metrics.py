@@ -7,8 +7,10 @@ from ledger import SQLiteLedger
 from replay import replay_ledger
 from datetime import datetime, timezone
 
-DB = "data/runtime/ledger.db"
-rid = "paper-1775405706-c34213f0"
+DB = "data/runtime/ledger.db"# Read run_id from status.json (current runtime)
+with open("data/runtime/status.json") as f:
+    _st = json.load(f)
+rid = _st.get("run_id", "paper-1775775107-c923c890")
 
 conn = sqlite3.connect(DB)
 c = conn.cursor()

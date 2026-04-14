@@ -12,3 +12,6 @@ deploy/systemd/*.bak
 *.db
 *.sqlite3
 *.sqlite
+data/forensic-snapshots/
+data/runtime-backup-*/
+*.jsonl

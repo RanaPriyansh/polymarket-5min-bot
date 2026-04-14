@@ -143,6 +143,80 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
             health = runtime_health_payload(tmpdir, max_heartbeat_age=180)
             self.assertTrue(health["healthy"])
 
+    async def test_preserve_run_evidence_copies_runtime_and_optional_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            runtime_dir = data_dir / "runtime"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            telemetry = RuntimeTelemetry(runtime_dir)
+            telemetry.update_status(
+                run_id="paper-stop",
+                phase="running",
+                mode="paper",
+                loop_count=9,
+                win_rate=0.5,
+                resolved_trade_count=2,
+                bankroll=497.5,
+                risk={
+                    "capital": 497.5,
+                    "realized_pnl_total": -2.5,
+                },
+            )
+            telemetry.append_event("runtime.started", {"phase": "running"}, run_id="paper-stop")
+            telemetry.append_market_sample({"market_id": "m1", "mid": 0.42}, run_id="paper-stop")
+            telemetry.write_strategy_metrics({"toxicity_mm": {"orders_filled": 2}})
+            (runtime_dir / "ledger.db").write_bytes(b"sqlite-bytes")
+            (runtime_dir / "ops_status.txt").write_text("ops ok\n", encoding="utf-8")
+            (runtime_dir / "ops_evidence.txt").write_text("evidence ok\n", encoding="utf-8")
+            (runtime_dir / "ops_settlement_diagnostics.txt").write_text("settlement ok\n", encoding="utf-8")
+            (runtime_dir / "fill_markout_audit_latest.md").write_text("# fill audit\n", encoding="utf-8")
+            (runtime_dir / "settlement_latency_audit_latest.md").write_text("# settlement audit\n", encoding="utf-8")
+            (runtime_dir / "reconcile_metrics_latest.txt").write_text("reconcile ok\n", encoding="utf-8")
+            research_dir = data_dir / "research"
+            research_dir.mkdir(parents=True, exist_ok=True)
+            (research_dir / "latest.json").write_text('{"gate_state":"YELLOW"}\n', encoding="utf-8")
+            (research_dir / "latest.md").write_text("# latest\n", encoding="utf-8")
+
+            manifest = telemetry.preserve_run_evidence(trigger="circuit_breaker", snapshot_ts=1_744_333_600)
+
+            snapshot_dir = Path(manifest["snapshot_dir"])
+            self.assertTrue(snapshot_dir.exists())
+            self.assertEqual(manifest["run_id"], "paper-stop")
+            self.assertEqual(manifest["trigger"], "circuit_breaker")
+            self.assertEqual(manifest["bankroll"], 497.5)
+            self.assertEqual(manifest["resolved_trade_count"], 2)
+            self.assertTrue((snapshot_dir / "status.json").exists())
+            self.assertTrue((snapshot_dir / "events.jsonl").exists())
+            self.assertTrue((snapshot_dir / "market_samples.jsonl").exists())
+            self.assertTrue((snapshot_dir / "strategy_metrics.json").exists())
+            self.assertTrue((snapshot_dir / "ledger.db").exists())
+            self.assertTrue((snapshot_dir / "latest-status.txt").exists())
+            self.assertTrue((snapshot_dir / "ops_status.txt").exists())
+            self.assertTrue((snapshot_dir / "ops_evidence.txt").exists())
+            self.assertTrue((snapshot_dir / "ops_settlement_diagnostics.txt").exists())
+            self.assertTrue((snapshot_dir / "fill_markout_audit_latest.md").exists())
+            self.assertTrue((snapshot_dir / "settlement_latency_audit_latest.md").exists())
+            self.assertTrue((snapshot_dir / "reconcile_metrics_latest.txt").exists())
+            self.assertTrue((snapshot_dir / "research-latest.json").exists())
+            self.assertTrue((snapshot_dir / "research-latest.md").exists())
+            artifact_names = {Path(artifact["dest"]).name for artifact in manifest["artifacts"]}
+            self.assertTrue({
+                "status.json",
+                "events.jsonl",
+                "market_samples.jsonl",
+                "strategy_metrics.json",
+                "ledger.db",
+                "latest-status.txt",
+                "ops_status.txt",
+                "ops_evidence.txt",
+                "ops_settlement_diagnostics.txt",
+                "fill_markout_audit_latest.md",
+                "settlement_latency_audit_latest.md",
+                "reconcile_metrics_latest.txt",
+                "research-latest.json",
+                "research-latest.md",
+            }.issubset(artifact_names))
+
 
 if __name__ == "__main__":
     unittest.main()

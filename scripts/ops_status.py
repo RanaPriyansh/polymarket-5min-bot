@@ -18,9 +18,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Allow running from repo root
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+
+from scripts.operator_truth import artifact_truth_lines
 
 
 def load_json(path: Path, default=None):
@@ -90,6 +91,8 @@ def render_status(runtime_dir: Path, now_ts: float | None = None) -> str:
     lines.append("=" * 72)
     lines.append("  POLYMARKET 5/15m BOT  —  OPERATOR STATUS")
     lines.append("=" * 72)
+    lines.append("")
+    lines.extend(artifact_truth_lines(runtime_dir, artifact_run_id=run_id, generated_at_ts=now_ts))
     lines.append("")
 
     # Identity

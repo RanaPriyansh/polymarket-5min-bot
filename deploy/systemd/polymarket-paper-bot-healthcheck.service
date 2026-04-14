@@ -1,0 +1,12 @@
+[Unit]
+Description=Healthcheck and auto-heal Polymarket paper trading bot
+After=polymarket-paper-bot.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/obsidian-hermes-vault/projects/polymarket-5min-bot
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.env
+ExecStart=/bin/bash -lc 'cd /root/obsidian-hermes-vault/projects/polymarket-5min-bot && .venv/bin/python cli.py health --runtime-dir data/runtime --max-heartbeat-age 180 >/tmp/polymarket-paper-healthcheck.log 2>&1 || { cat /tmp/polymarket-paper-healthcheck.log; systemctl restart polymarket-paper-bot.service; }'
+StandardOutput=journal
+StandardError=journal

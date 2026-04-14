@@ -25,6 +25,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from scripts.operator_truth import status_truth_lines
+
 
 def fmt_ts(ts: float) -> str:
     try:
@@ -77,7 +79,10 @@ def render_evidence(runtime_dir: Path) -> str:
     lines.append("  EVIDENCE SURFACE -- Strategy Performance from Runtime Artifacts")
     lines.append("=" * 72)
     lines.append("")
-    lines.append(f"Run:          {run_id}")
+    lines.append("Report scope: all-run ledger counts + runtime-wide strategy metrics + current status snapshot")
+    lines.extend(status_truth_lines(runtime_dir, generated_at_ts=now_ts))
+    lines.append("")
+    lines.append(f"Active status run: {run_id}")
     lines.append(f"Mode:         {mode}")
     lines.append(f"Bankroll:     ${bankroll:,.2f}")
     lines.append(f"Report time:  {fmt_ts(now_ts)}")
@@ -86,7 +91,7 @@ def render_evidence(runtime_dir: Path) -> str:
 
     # Ledger event breakdown
     if ledger_counts:
-        lines.append("--- LEDGER EVENT COUNTS (from ledger.db) ---")
+        lines.append("--- LEDGER EVENT COUNTS (all runs in ledger.db) ---")
         for et, cnt in sorted(ledger_counts.items(), key=lambda x: -x[1])[:15]:
             lines.append(f"  {et:40s} {cnt:>10,}")
         if len(ledger_counts) > 15:
@@ -94,7 +99,7 @@ def render_evidence(runtime_dir: Path) -> str:
         lines.append("")
 
     # Family metrics
-    lines.append("--- FAMILY METRICS (from strategy_metrics.json) ---")
+    lines.append("--- FAMILY METRICS (runtime-wide snapshot from strategy_metrics.json) ---")
     if metrics:
         for fam, m in sorted(metrics.items()):
             if isinstance(m, dict):

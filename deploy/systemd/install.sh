@@ -61,8 +61,8 @@ echo "=== systemd status ==="
 systemctl status "$BOT_NAME" --no-pager
 
 echo
-echo "=== ExecStart verification ==="
-systemctl show "$BOT_NAME" -p ExecStart -p WorkingDirectory --no-pager
+echo "=== unit verification ==="
+systemctl show "$BOT_NAME" -p ExecStart -p WorkingDirectory -p Restart -p RestartUSec --no-pager
 
 echo
 echo "=== research timer ==="

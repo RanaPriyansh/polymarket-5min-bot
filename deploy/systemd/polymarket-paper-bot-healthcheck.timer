@@ -1,0 +1,12 @@
+[Unit]
+Description=Healthcheck and auto-heal loop for Polymarket paper trading bot
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=30s
+Persistent=true
+Unit=polymarket-paper-bot-healthcheck.service
+
+[Install]
+WantedBy=timers.target

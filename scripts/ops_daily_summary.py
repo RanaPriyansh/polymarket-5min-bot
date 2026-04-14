@@ -24,6 +24,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from scripts.operator_truth import load_json, status_truth_lines
+
 
 def fmt_ts(ts: float) -> str:
     try:
@@ -87,10 +89,15 @@ def render_daily_summary(runtime_dir: Path, target_date: str | None = None) -> s
     events = get_events_for_day(runtime_dir, target_date)
 
     if not events:
+        status = load_json(runtime_dir / "status.json", {})
+        generated_at_ts = datetime.now(tz=timezone.utc).timestamp()
         lines = [
             "=" * 72,
             "  DAILY OPERATOR SUMMARY",
             "=" * 72,
+            "",
+            f"Report scope: UTC day {target_date} from events.jsonl/ledger.db + current status snapshot",
+            *status_truth_lines(runtime_dir, generated_at_ts=generated_at_ts),
             "",
             f"No events found for {target_date}",
             "  (events.jsonl may have been rotated or the day had no activity)",
@@ -149,21 +156,26 @@ def render_daily_summary(runtime_dir: Path, target_date: str | None = None) -> s
         if run_id:
             unique_run_ids.add(run_id)
 
-        if "order" in et:
+        if et in {"quote.submitted", "order_created", "order_acknowledged", "order.accepted"}:
             family_metrics[family]["orders"] += 1
-        elif "fill" in et:
+        elif et in {"order.filled", "fill_applied", "fill_observed"}:
             family_metrics[family]["fills"] += 1
-        elif "cancel" in et:
+        elif et in {"order.cancelled", "order_cancelled"}:
             family_metrics[family]["cancels"] += 1
 
     first_ts = min(e.get("ts", 0) for e in events)
     last_ts = max(e.get("ts", 0) for e in events)
     span = last_ts - first_ts
+    status = load_json(runtime_dir / "status.json", {})
+    generated_at_ts = datetime.now(tz=timezone.utc).timestamp()
 
     lines = []
     lines.append("=" * 72)
     lines.append(f"  DAILY OPERATOR SUMMARY: {target_date}")
     lines.append("=" * 72)
+    lines.append("")
+    lines.append(f"Report scope: UTC day {target_date} from events.jsonl + current status snapshot")
+    lines.extend(status_truth_lines(runtime_dir, generated_at_ts=generated_at_ts))
     lines.append("")
     lines.append(f"Period:       {fmt_ts(first_ts)} to {fmt_ts(last_ts)} UTC")
     lines.append(f"Total events: {total_events:,}")
@@ -201,7 +213,7 @@ def render_daily_summary(runtime_dir: Path, target_date: str | None = None) -> s
                 resolved = status.get("resolved_trade_count", 0)
                 win_rate = status.get("win_rate", 0.0)
 
-                lines.append("--- CURRENT RUN STATUS ---")
+                lines.append("--- CURRENT STATUS SNAPSHOT ---")
                 lines.append(f"Run:          {status.get('run_id', '?')}")
                 lines.append(f"Bankroll:     ${bankroll:,.2f}")
                 lines.append(f"Resolved:     {resolved}")
