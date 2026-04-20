@@ -70,6 +70,44 @@ class RiskManager:
         capped_units = capped_dollar / price
         return round(min(requested_size, capped_units), 2)
 
+    def calculate_bounded_size(
+        self,
+        strategy: str,
+        *,
+        edge: float,
+        price: float,
+        stop_loss_distance: float,
+        confidence: float = 1.0,
+    ) -> PositionSizing:
+        if price <= 0:
+            return PositionSizing(size=0.0, confidence=confidence, kelly_fraction=0.0, max_loss=0.0, reason="price<=0")
+        if edge <= 0:
+            return PositionSizing(size=0.0, confidence=confidence, kelly_fraction=0.0, max_loss=0.0, reason="edge<=0")
+        if stop_loss_distance <= 0:
+            return PositionSizing(size=0.0, confidence=confidence, kelly_fraction=0.0, max_loss=0.0, reason="stop_loss_distance<=0")
+
+        params = self.strategy_params.get(strategy, {})
+        base_fraction = float(params.get("kelly_fraction", 0.25))
+        bounded_confidence = max(0.0, min(float(confidence), 1.0))
+        kelly_fraction = max(0.0, min(base_fraction * (edge / stop_loss_distance) * bounded_confidence, 0.25))
+
+        target_dollar = self.current_capital * kelly_fraction
+        max_position_dollar = self.current_capital * self.config.get("max_position_size", 0.1)
+        max_loss_limited_dollar = self.max_risk_per_trade_usd / stop_loss_distance
+        target_dollar = min(target_dollar, max_position_dollar, self.max_risk_per_trade_usd, max_loss_limited_dollar)
+        size = target_dollar / price if target_dollar > 0 else 0.0
+        max_loss = size * price * stop_loss_distance
+        return PositionSizing(
+            size=round(max(size, 0.0), 2),
+            confidence=bounded_confidence,
+            kelly_fraction=kelly_fraction,
+            max_loss=round(max_loss, 6),
+            reason=(
+                f"BoundedKelly(f={kelly_fraction:.2%}, edge={edge:.4f}, stop={stop_loss_distance:.4f}, "
+                f"confidence={bounded_confidence:.2f})"
+            ),
+        )
+
     def check_circuit_breakers(self, risk_report: Optional[Dict] = None) -> bool:
         report = risk_report or self.get_risk_report()
         capital = float(report.get("capital", self.initial_capital))

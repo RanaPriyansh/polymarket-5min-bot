@@ -1,0 +1,13 @@
+experiment_id: multi-family-bakeoff-60
+max_loops: 60
+sleep_seconds: 5
+runtime_root: data/experiments/multi-family-bakeoff-60
+trials:
+  - family: toxicity_mm
+    label: baseline
+  - family: mean_reversion_5min
+    label: mean_reversion_5min
+  - family: opening_range
+    label: opening_range
+  - family: time_decay
+    label: time_decay

@@ -62,7 +62,17 @@ class RuntimeTelemetry:
     def read_json(self, path: Path) -> Optional[Dict]:
         if not path.exists():
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        if not raw.strip():
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def read_status(self) -> Dict:
         return self.read_json(self.status_path) or {}

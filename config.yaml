@@ -26,6 +26,7 @@ filters:
 execution:
   paper_starting_bankroll: 500
   mm_paper_max_notional_usd: 6
+  min_seconds_to_expiry_for_new_orders: 120
   quote_refresh_seconds: 5
   resolution_initial_poll_seconds: 10
   resolution_poll_cap_seconds: 300
@@ -62,10 +63,12 @@ strategies:
     opening_range_ticks: 3
     breakout_pct: 0.3
     min_volume: 5000
+    min_seconds_to_expiry_for_new_orders: 180
   time_decay:
     min_seconds_left: 10
     max_seconds_left: 60
     min_price: 0.55
+    min_seconds_to_expiry_for_new_orders: 0
 runtime:
   dir: data/runtime
 telegram:

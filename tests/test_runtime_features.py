@@ -43,6 +43,20 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await executor.__aexit__(None, None, None)
 
+    async def test_partial_fill_counts_as_filled_telemetry(self):
+        executor = PolymarketExecutor(self.config, market_data=None, mode="paper")
+        await executor.__aenter__()
+        try:
+            order_id = await executor.place_order("m1", "YES", "BUY", 10, 0.55, strategy_family="toxicity_mm", order_kind="quote")
+            fill = executor.fill_order(order_id, fill_price=0.54, fill_size=2.5)
+            metrics = executor.get_family_metrics()["toxicity_mm"]
+            self.assertTrue(fill["filled"])
+            self.assertEqual(metrics["orders_filled"], 1)
+            self.assertEqual(metrics["orders_resting"], 1)
+            self.assertEqual(executor.orders[order_id]["status"], "partially_filled")
+        finally:
+            await executor.__aexit__(None, None, None)
+
     async def test_assess_book_quality_rejects_toxic_books(self):
         ob = OrderBook(
             market_id="m2",
@@ -121,6 +135,9 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
                 open_position_count=1,
                 resolved_trade_count=2,
                 win_rate=0.5,
+                gate_state="RED",
+                gate_reasons=["win_rate=0.090 < 0.20 with resolved_count=35 >= 20"],
+                new_order_pause=True,
                 risk={
                     "capital": 501.25,
                     "daily_pnl": 1.25,
@@ -137,11 +154,48 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Run id: paper-test", rendered)
             self.assertIn("Baseline strategy: toxicity_mm", rendered)
             self.assertIn("Research candidates: mean_reversion_5min, opening_range, time_decay", rendered)
+            self.assertIn("Runtime gate: RED | New orders paused: True", rendered)
+            self.assertIn("Gate reasons: win_rate=0.090 < 0.20 with resolved_count=35 >= 20", rendered)
             self.assertIn("Strategy metrics:", rendered)
             self.assertIn("toxicity_mm", rendered)
             self.assertTrue(Path(tmpdir, "latest-status.txt").exists())
             health = runtime_health_payload(tmpdir, max_heartbeat_age=180)
             self.assertTrue(health["healthy"])
+
+    async def test_runtime_telemetry_treats_empty_status_file_as_empty_dict(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            (runtime_dir / "status.json").write_text("", encoding="utf-8")
+            telemetry = RuntimeTelemetry(runtime_dir)
+            self.assertEqual(telemetry.read_status(), {})
+            rendered = render_status_text(runtime_dir)
+            self.assertIn("Run id: unknown", rendered)
+
+    async def test_runtime_health_payload_handles_invalid_status_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            (runtime_dir / "status.json").write_text("{", encoding="utf-8")
+            telemetry = RuntimeTelemetry(runtime_dir)
+            self.assertEqual(telemetry.read_status(), {})
+            payload = runtime_health_payload(runtime_dir, max_heartbeat_age=180)
+            self.assertFalse(payload["healthy"])
+
+    async def test_runtime_status_payload_skips_corrupt_event_lines(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            telemetry = RuntimeTelemetry(runtime_dir)
+            telemetry.update_status(run_id="paper-test", phase="running", mode="paper")
+            telemetry.events_path.write_text(
+                '\n'.join([
+                    '{"event_type":"runtime.started","payload":{"run_id":"paper-test"},"run_id":"paper-test","ts":1}',
+                    '{"event_type":"runtime.started","payload":{"run_id":"paper-test"}',
+                    '{"event_type":"runtime.loop","payload":{"loop":1},"run_id":"paper-test","ts":2}',
+                ]) + '\n',
+                encoding="utf-8",
+            )
+            payload = runtime_health_payload(runtime_dir, max_heartbeat_age=180)
+            self.assertTrue(payload["healthy"])
+            self.assertEqual(len(payload["recent_events"]), 2)
 
     async def test_preserve_run_evidence_copies_runtime_and_optional_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:

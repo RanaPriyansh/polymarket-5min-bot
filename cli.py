@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
+import shutil
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -18,10 +21,20 @@ import click
 import yaml
 
 from baseline_evidence import build_baseline_evidence, render_baseline_evidence_text
+from execution import resolve_directional_signal_entry_style
+from research.gate import build_gate_inputs, compute_gate_state
 from research.loop import ResearchLoop
 from research.polymarket import PolymarketRuntimeResearchAdapter
 from runtime_telemetry import RuntimeTelemetry
 from status_utils import render_status_text, runtime_health_payload
+from strategy_bakeoff import (
+    build_trial_command,
+    build_trial_runtime_dir,
+    collect_trial_outcome,
+    load_bakeoff_spec,
+    rank_trials,
+    write_bakeoff_artifacts,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +42,8 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parent
+CLI_SCRIPT_PATH = PROJECT_ROOT / "cli.py"
 
 
 @click.group()
@@ -117,6 +132,112 @@ def _strategy_governance(cfg: dict, active_strategies: List[str]) -> Dict[str, o
         "baseline_strategy": baseline,
         "research_candidates": candidates,
     }
+
+
+def _runtime_gate_snapshot(runtime_dir: str | Path) -> Dict[str, object]:
+    gate_inputs = build_gate_inputs(str(runtime_dir))
+    gate_state, gate_reasons = compute_gate_state(gate_inputs)
+    return {
+        "gate_state": gate_state,
+        "gate_reasons": gate_reasons,
+        "gate_inputs": gate_inputs,
+    }
+
+
+def _should_pause_new_orders(gate_state: str, gate_reasons: List[str]) -> bool:
+    if gate_state != "RED":
+        return False
+    normalized = [str(reason).lower() for reason in gate_reasons]
+    return any(
+        (
+            "win_rate=" in reason
+            or "circuit_breaker" in reason
+            or "contradiction_log_open" in reason
+        )
+        for reason in normalized
+    )
+
+
+def _strategy_directional_signal_entry_style(cfg: dict, strategy_family: str, signal=None) -> str:
+    return resolve_directional_signal_entry_style(cfg, strategy_family, signal)
+
+
+def _bounded_directional_signal_size(risk_mgr, strategy_family: str, signal, reference_price: float) -> float:
+    price = max(float(reference_price or 0.0), 0.01)
+    limit_price = max(float(getattr(signal, "price", price) or price), 0.01)
+    confidence = max(0.0, min(float(getattr(signal, "confidence", 0.0) or 0.0), 1.0))
+    stop_loss_distance = max(abs(limit_price - price), 0.02)
+    edge = max(stop_loss_distance * confidence, 0.0)
+    bounded = risk_mgr.calculate_bounded_size(
+        strategy_family,
+        edge=edge,
+        price=price,
+        stop_loss_distance=stop_loss_distance,
+        confidence=confidence,
+    )
+    requested_size = float(getattr(signal, "size", 0.0) or 0.0)
+    return min(requested_size, bounded.size) if bounded.size > 0 else 0.0
+
+
+def _strategy_min_seconds_to_expiry(cfg: dict, strategy_family: str) -> float:
+    strategy_cfg = (cfg.get("strategies", {}) or {}).get(strategy_family, {}) or {}
+    if "min_seconds_to_expiry_for_new_orders" in strategy_cfg:
+        return float(strategy_cfg.get("min_seconds_to_expiry_for_new_orders", 0))
+    execution_cfg = cfg.get("execution", {}) or {}
+    return float(execution_cfg.get("min_seconds_to_expiry_for_new_orders", 120))
+
+
+def _entry_gate_for_market(
+    cfg: dict,
+    market: Dict,
+    *,
+    now_ts: float,
+    strategy_family: str,
+    gate_state: str,
+    gate_reasons: List[str],
+) -> tuple[bool, List[str]]:
+    reasons: List[str] = []
+    if _should_pause_new_orders(gate_state, gate_reasons):
+        reasons.append("runtime_gate_red")
+        reasons.extend([f"gate:{reason}" for reason in gate_reasons])
+        return False, reasons
+
+    min_seconds = _strategy_min_seconds_to_expiry(cfg, strategy_family)
+    end_ts = market.get("end_ts")
+    if end_ts is not None:
+        seconds_left = float(end_ts) - float(now_ts)
+        if seconds_left < min_seconds:
+            reasons.append(f"tte_lt_{int(min_seconds)}s")
+            return False, reasons
+
+    return True, reasons
+
+
+def _strategy_entry_allowed(
+    runtime: RuntimeTelemetry,
+    cfg: dict,
+    market: Dict,
+    *,
+    now_ts: float,
+    strategy_family: str,
+    gate_snapshot: Dict[str, object],
+) -> bool:
+    entry_allowed, entry_reasons = _entry_gate_for_market(
+        cfg,
+        market,
+        now_ts=now_ts,
+        strategy_family=strategy_family,
+        gate_state=str(gate_snapshot["gate_state"]),
+        gate_reasons=list(gate_snapshot["gate_reasons"]),
+    )
+    if not entry_allowed:
+        runtime.append_event("market.entry_blocked", {
+            "market_id": market["id"],
+            "market_slug": market["slug"],
+            "strategy_family": strategy_family,
+            "reasons": entry_reasons,
+        })
+    return entry_allowed
 
 
 def _enforce_clock_drift(drift_seconds: float) -> None:
@@ -326,6 +447,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         *[md.get_orderbook(market) for market in all_markets],
                         return_exceptions=True,
                     )
+                    gate_snapshot = _runtime_gate_snapshot(runtime_dir)
 
                     processed_markets = 0
                     toxic_skips = 0
@@ -377,21 +499,25 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
 
                         if not book_quality.is_tradeable:
                             toxic_skips += 1
-                            for strategy_family in active_strategies:
-                                executor.note_toxic_book_skip(strategy_family)
-                            runtime.append_event("market.skipped_toxic_book", {
+                            runtime.append_event("market.runtime_baseline_untradeable", {
                                 "market_id": market_id,
                                 "market_slug": market["slug"],
                                 "reasons": list(book_quality.reasons),
                                 "spread_bps": book_quality.spread_bps,
                                 "top_depth": book_quality.top_depth,
                             })
-                            continue
 
                         processed_markets += 1
                         volume = float(market.get("volume", 0))
 
-                        if "mean_reversion_5min" in active_strategies:
+                        if "mean_reversion_5min" in active_strategies and _strategy_entry_allowed(
+                            runtime,
+                            cfg,
+                            market,
+                            now_ts=loop_now,
+                            strategy_family="mean_reversion_5min",
+                            gate_snapshot=gate_snapshot,
+                        ):
                             signal = mean_rev.generate_signal(
                                 market_id,
                                 primary_outcome,
@@ -401,7 +527,12 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                 interval_minutes=market.get("interval_minutes"),
                             )
                             if signal:
-                                signal.size = risk_mgr.cap_requested_size(max(mid, 0.01), signal.size)
+                                signal.size = _bounded_directional_signal_size(
+                                    risk_mgr,
+                                    "mean_reversion_5min",
+                                    signal,
+                                    reference_price=max(mid, 0.01),
+                                )
                                 if signal.size > 0:
                                     click.echo(
                                         f"SIGNAL: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{mid:.4f} ({signal.reason})"
@@ -409,7 +540,14 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     result = await executor.execute_signal_trade(market, orderbook, signal)
                                     _emit_events(runtime, result.get("events", []), run_id=run_id)
 
-                        if "opening_range" in active_strategies:
+                        if "opening_range" in active_strategies and _strategy_entry_allowed(
+                            runtime,
+                            cfg,
+                            market,
+                            now_ts=loop_now,
+                            strategy_family="opening_range",
+                            gate_snapshot=gate_snapshot,
+                        ):
                             opening_range.update_price(market_id, mid, volume)
                             signal = opening_range.generate_signal(
                                 market_id,
@@ -420,7 +558,12 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                 slot_id=market.get("slot_id", ""),
                             )
                             if signal:
-                                signal.size = risk_mgr.cap_requested_size(max(signal.price, 0.01), signal.size)
+                                signal.size = _bounded_directional_signal_size(
+                                    risk_mgr,
+                                    "opening_range",
+                                    signal,
+                                    reference_price=max(signal.price, 0.01),
+                                )
                                 if signal.size > 0 and not executor.has_strategy_market_exposure("opening_range", market_id):
                                     click.echo(
                                         f"OPENING RANGE: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
@@ -428,10 +571,22 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="opening_range")
                                     _emit_events(runtime, result.get("events", []), run_id=run_id)
 
-                        if "time_decay" in active_strategies:
+                        if "time_decay" in active_strategies and _strategy_entry_allowed(
+                            runtime,
+                            cfg,
+                            market,
+                            now_ts=loop_now,
+                            strategy_family="time_decay",
+                            gate_snapshot=gate_snapshot,
+                        ):
                             signal = time_decay.generate_signal(market_id, market, orderbook, current_time=loop_now)
                             if signal:
-                                signal.size = risk_mgr.cap_requested_size(max(signal.price, 0.01), signal.size)
+                                signal.size = _bounded_directional_signal_size(
+                                    risk_mgr,
+                                    "time_decay",
+                                    signal,
+                                    reference_price=max(signal.price, 0.01),
+                                )
                                 if signal.size > 0 and not executor.has_strategy_market_exposure("time_decay", market_id):
                                     click.echo(
                                         f"TIME DECAY: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
@@ -439,7 +594,14 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="time_decay")
                                     _emit_events(runtime, result.get("events", []), run_id=run_id)
 
-                        if "toxicity_mm" in active_strategies:
+                        if "toxicity_mm" in active_strategies and _strategy_entry_allowed(
+                            runtime,
+                            cfg,
+                            market,
+                            now_ts=loop_now,
+                            strategy_family="toxicity_mm",
+                            gate_snapshot=gate_snapshot,
+                        ):
                             # Choose quote outcome: prefer whichever side has less executor exposure.
                             # If no position exists, alternate between Up/Down per loop to avoid pure directionality.
                             primary_outcome = market["outcomes"][0]  # "Up"
@@ -537,6 +699,13 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         latest_settlement=executor_snapshot["latest_settlement"],
                         positions=positions,
                         risk=risk_report,
+                        gate_state=gate_snapshot["gate_state"],
+                        gate_reasons=gate_snapshot["gate_reasons"],
+                        gate_inputs=gate_snapshot["gate_inputs"],
+                        new_order_pause=_should_pause_new_orders(
+                            str(gate_snapshot["gate_state"]),
+                            list(gate_snapshot["gate_reasons"]),
+                        ),
                         **strategy_governance,
                     )
                     click.echo(
@@ -727,6 +896,84 @@ def evidence_cmd(runtime_dir, strategy_family, event_limit, sample_limit):
         sample_limit=sample_limit,
     )
     click.echo(render_baseline_evidence_text(payload))
+
+
+@cli.command(name="bakeoff")
+@click.option("--spec-path", default="configs/strategy-bakeoff.yaml", help="Bakeoff YAML spec path")
+@click.option("--python-bin", default=".venv/bin/python", help="Python interpreter used for trial subprocesses")
+@click.option("--dry-run/--no-dry-run", default=False, help="Print commands without executing bounded runs")
+def bakeoff(spec_path, python_bin, dry_run):
+    """Run bounded isolated strategy family trials and emit one summary packet."""
+    spec = load_bakeoff_spec(spec_path)
+    experiment_dir = Path(spec.runtime_root)
+    trials_dir = experiment_dir / "trials"
+
+    outcomes = []
+    click.echo(f"Bakeoff: {spec.experiment_id} ({len(spec.trials)} trials)")
+    for trial in spec.trials:
+        runtime_dir = Path(build_trial_runtime_dir(spec, trial))
+        command = build_trial_command(
+            python_bin=python_bin,
+            trial=trial,
+            runtime_dir=runtime_dir,
+            max_loops=spec.max_loops,
+            sleep_seconds=spec.sleep_seconds,
+            cli_path=str(CLI_SCRIPT_PATH),
+        )
+        click.echo(f"- {trial.family}: {shlex.join(command)}")
+        if dry_run:
+            continue
+
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        trials_dir.mkdir(parents=True, exist_ok=True)
+        if runtime_dir.exists():
+            shutil.rmtree(runtime_dir)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            raise click.ClickException(
+                f"Unable to launch trial subprocess for {trial.family}: command={shlex.join(command)} | error={exc}"
+            ) from exc
+        if completed.returncode != 0:
+            stdout_snippet = (completed.stdout or "").strip()
+            stderr_snippet = (completed.stderr or "").strip()
+            details = [
+                f"Trial failed for {trial.family}",
+                f"returncode={completed.returncode}",
+                f"command={shlex.join(command)}",
+            ]
+            if stdout_snippet:
+                details.append(f"stdout={stdout_snippet[-500:]}")
+            if stderr_snippet:
+                details.append(f"stderr={stderr_snippet[-500:]}")
+            raise click.ClickException(" | ".join(details))
+
+        outcome = collect_trial_outcome(runtime_dir, trial.family, label=trial.label)
+        outcomes.append(outcome)
+
+    if dry_run:
+        return
+
+    ranked = rank_trials(outcomes)
+    artifacts = write_bakeoff_artifacts(experiment_dir, spec, ranked)
+    winner = ranked[0] if ranked else None
+    if winner is None:
+        click.echo("Winner: none")
+    else:
+        click.echo(
+            f"Winner: {winner.family} settled={winner.settled_count} resolved={winner.resolved_count} "
+            f"pnl={winner.realized_pnl:.4f} fills={winner.fill_count} toxic_skips={winner.toxic_skip_count}"
+        )
+    click.echo(f"Summary: {artifacts['summary_json']}")
+    click.echo(f"Report: {artifacts['summary_md']}")
 
 
 @cli.command()

@@ -58,6 +58,14 @@ def render_status_text(runtime_dir: str | Path) -> str:
         f"Resolved: {status.get('resolved_trade_count', 0)} | Win rate: {float(status.get('win_rate', 0.0)):.2%}",
     ]
 
+    if status.get("gate_state"):
+        lines.append(
+            f"Runtime gate: {status.get('gate_state')} | New orders paused: {bool(status.get('new_order_pause', False))}"
+        )
+        gate_reasons = status.get("gate_reasons", []) or []
+        if gate_reasons:
+            lines.append(f"Gate reasons: {'; '.join(str(item) for item in gate_reasons)}")
+
     if baseline:
         lines.append(f"Baseline strategy: {baseline}")
     if research_candidates:

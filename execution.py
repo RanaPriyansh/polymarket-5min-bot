@@ -47,6 +47,55 @@ class SlotState:
     close_reason: str = ""
 
 
+def resolve_directional_signal_entry_style(config: dict, strategy_family: str, signal=None) -> str:
+    execution_cfg = config.get("execution", {}) or {}
+    strategies_cfg = config.get("strategies", {}) or {}
+    strategy_cfg = strategies_cfg.get(strategy_family, {}) or {}
+    signal_style = getattr(signal, "entry_style", None)
+    style = signal_style or strategy_cfg.get(
+        "directional_signal_entry_style",
+        execution_cfg.get("directional_signal_entry_style", "marketable"),
+    )
+    normalized = str(style or "marketable").strip().lower()
+    if normalized not in {"marketable", "resting_limit"}:
+        return "marketable"
+    return normalized
+
+
+def resolve_signal_fill_behavior(
+    config: dict,
+    strategy_family: str,
+    signal,
+    *,
+    best_bid: float,
+    best_ask: float,
+) -> Dict[str, object]:
+    entry_style = resolve_directional_signal_entry_style(config, strategy_family, signal)
+    side = str(getattr(signal, "action", "")).upper()
+    aggressive_price = float(best_ask if side == "BUY" else best_bid)
+    signal_price = getattr(signal, "price", None)
+    limit_price = float(signal_price) if signal_price is not None else aggressive_price
+
+    if entry_style == "resting_limit":
+        should_fill_immediately = (
+            aggressive_price > 0
+            and ((side == "BUY" and limit_price >= float(best_ask)) or (side == "SELL" and limit_price <= float(best_bid)))
+        )
+        return {
+            "entry_style": entry_style,
+            "order_price": limit_price,
+            "fill_price": aggressive_price if should_fill_immediately else None,
+            "should_fill_immediately": should_fill_immediately,
+        }
+
+    return {
+        "entry_style": "marketable",
+        "order_price": aggressive_price,
+        "fill_price": aggressive_price,
+        "should_fill_immediately": aggressive_price > 0,
+    }
+
+
 class PolymarketExecutor:
     def __init__(
         self,
@@ -57,6 +106,7 @@ class PolymarketExecutor:
         run_id: str | None = None,
         ledger: SQLiteLedger | None = None,
     ):
+        self.config = config
         execution_cfg = config.get("execution", {})
         self.clob_url = config["polymarket"]["clob_api_url"]
         self.wallet_address = config["polymarket"].get("wallet_address", "paper-wallet")
@@ -220,11 +270,16 @@ class PolymarketExecutor:
     def _rebuild_signal_slots_from_orders(self) -> None:
         self.signal_slots = {}
         for (family, market_id, outcome), position in self.positions.items():
-            if family != "mean_reversion_5min" or abs(position.quantity) <= 1e-9:
+            if abs(position.quantity) <= 1e-9:
                 continue
             matching_order = None
             for order in self.orders.values():
-                if order.get("market_id") == market_id and order.get("outcome") == outcome and order.get("strategy_family") == family:
+                if (
+                    order.get("market_id") == market_id
+                    and order.get("outcome") == outcome
+                    and order.get("strategy_family") == family
+                    and order.get("order_kind") == "signal"
+                ):
                     matching_order = order
                     break
             slot_id = None if matching_order is None else matching_order.get("slot_id")
@@ -250,6 +305,40 @@ class PolymarketExecutor:
                     updated_ts=updated_ts,
                     end_ts=end_ts,
                 )
+
+    def _open_signal_orders(self, slot_id: str, strategy_family: str) -> List[Dict]:
+        return [
+            order
+            for order in self.orders.values()
+            if order.get("slot_id") == slot_id
+            and order.get("strategy_family") == strategy_family
+            and order.get("order_kind") == "signal"
+            and order.get("status") in {"open", "partially_filled", "acknowledged"}
+        ]
+
+    def _upsert_signal_slot_from_order(self, order: Dict, *, updated_ts: float) -> Optional[SlotState]:
+        if order.get("order_kind") != "signal":
+            return None
+        slot_id = order.get("slot_id")
+        if not slot_id:
+            return None
+        position = self.positions.get((order["strategy_family"], order["market_id"], order["outcome"]))
+        if position is None or abs(position.quantity) <= 1e-9:
+            return None
+        slot_state = SlotState(
+            slot_id=slot_id,
+            market_id=order["market_id"],
+            market_slug=order.get("market_slug", ""),
+            strategy_family=order["strategy_family"],
+            outcome=order["outcome"],
+            quantity=position.quantity,
+            average_price=position.average_price,
+            opened_ts=float(order.get("created_ts", order.get("timestamp", updated_ts))),
+            updated_ts=float(updated_ts),
+            end_ts=float(order.get("market_end_ts", 0.0) or 0.0),
+        )
+        self.signal_slots[slot_id] = slot_state
+        return slot_state
 
     def _order_created_event(self, order: Dict) -> LedgerEvent:
         return LedgerEvent(
@@ -578,6 +667,9 @@ class PolymarketExecutor:
         if order["status"] == "filled":
             metrics = self._ensure_family_metrics(order["strategy_family"])
             metrics["orders_resting"] = max(0, metrics["orders_resting"] - 1)
+        else:
+            metrics = self._ensure_family_metrics(order["strategy_family"])
+        if filled_before <= 1e-9 and executed_size > 1e-9:
             metrics["orders_filled"] += 1
 
         if observed_event is None:
@@ -595,12 +687,13 @@ class PolymarketExecutor:
             correlation_id=order_id,
         )
         self._persist_events(observed_event, applied_event)
+        slot_state = self._upsert_signal_slot_from_order(order, updated_ts=executed_ts)
         if self.ledger is not None:
             realized_delta = self.realized_pnl_total - realized_before
             order = self.orders.get(order_id, order)
 
         logger.info("Order filled: %s family=%s realized_delta=%.4f", order_id, order["strategy_family"], realized_delta)
-        return {
+        result = {
             "filled": True,
             "order_id": order_id,
             "strategy_family": order["strategy_family"],
@@ -613,6 +706,9 @@ class PolymarketExecutor:
             "fill_price": executed_price,
             "size": executed_size,
         }
+        if slot_state is not None:
+            result["slot_state"] = asdict(slot_state)
+        return result
 
     def evaluate_market_orders(self, market_id: str, orderbook: "OrderBook"):
         fills = []
@@ -686,7 +782,7 @@ class PolymarketExecutor:
         if abs(quantity) <= 1e-9:
             slot.status = "closed"
             slot.close_reason = reason
-            del self.signal_slots[slot_id]
+            self.signal_slots.pop(slot_id, None)
             return []
 
         side = "SELL" if quantity > 0 else "BUY"
@@ -711,7 +807,7 @@ class PolymarketExecutor:
         slot.status = "closed"
         slot.updated_ts = orderbook.timestamp
         slot.close_reason = reason
-        del self.signal_slots[slot_id]
+        self.signal_slots.pop(slot_id, None)
         return [
             {
                 "event_type": "position.closed",
@@ -749,8 +845,32 @@ class PolymarketExecutor:
                 return {"opened": False, "reason": "existing_same_direction", "events": []}
             events.extend(await self.close_signal_slot(slot_id, orderbook, reason="signal_reversal"))
 
-        fill_price = self.md.best_ask(orderbook, signal.outcome) if signal.action == "BUY" else self.md.best_bid(orderbook, signal.outcome)
-        if fill_price <= 0:
+        existing_orders = self._open_signal_orders(slot_id, strategy_family)
+        if existing_orders:
+            same_direction_order = next(
+                (
+                    order for order in existing_orders
+                    if order.get("outcome") == signal.outcome and order.get("side") == signal.action
+                ),
+                None,
+            )
+            if same_direction_order is not None:
+                return {"opened": False, "reason": "existing_open_order_same_direction", "events": events}
+            for order in existing_orders:
+                await self.cancel_order(order["order_id"])
+
+        best_bid = self.md.best_bid(orderbook, signal.outcome)
+        best_ask = self.md.best_ask(orderbook, signal.outcome)
+        fill_behavior = resolve_signal_fill_behavior(
+            self.config,
+            strategy_family,
+            signal,
+            best_bid=best_bid,
+            best_ask=best_ask,
+        )
+        order_price = float(fill_behavior["order_price"])
+        fill_price = fill_behavior.get("fill_price")
+        if order_price <= 0:
             return {"opened": False, "reason": "missing_fill_price", "events": []}
 
         order_id = await self.place_order(
@@ -758,15 +878,41 @@ class PolymarketExecutor:
             signal.outcome,
             signal.action,
             signal.size,
-            fill_price,
-            post_only=False,
+            order_price,
+            post_only=not bool(fill_behavior["should_fill_immediately"]),
             strategy_family=strategy_family,
             order_kind="signal",
             market=market,
         )
         if not order_id:
             return {"opened": False, "reason": "order_rejected", "events": events}
-        fill = self.fill_order(order_id, fill_price=fill_price, fill_ts=orderbook.timestamp)
+
+        events.append(
+            {
+                "event_type": "order.opened",
+                "slot_id": slot_id,
+                "market_id": market["id"],
+                "market_slug": market["slug"],
+                "strategy_family": strategy_family,
+                "outcome": signal.outcome,
+                "side": signal.action,
+                "size": signal.size,
+                "price": order_price,
+                "reason": signal.reason,
+                "entry_style": fill_behavior["entry_style"],
+            }
+        )
+        if not fill_behavior["should_fill_immediately"] or fill_price is None:
+            return {
+                "opened": True,
+                "filled": False,
+                "order_id": order_id,
+                "events": events,
+                "entry_style": fill_behavior["entry_style"],
+                "resting_order_price": order_price,
+            }
+
+        fill = self.fill_order(order_id, fill_price=float(fill_price), fill_ts=orderbook.timestamp)
         position = self.positions[(strategy_family, market["id"], signal.outcome)]
         slot_state = SlotState(
             slot_id=slot_id,
@@ -781,29 +927,21 @@ class PolymarketExecutor:
             end_ts=market["end_ts"],
         )
         self.signal_slots[slot_id] = slot_state
-        events.extend([
-            {
-                "event_type": "order.opened",
-                "slot_id": slot_id,
-                "market_id": market["id"],
-                "market_slug": market["slug"],
-                "strategy_family": strategy_family,
-                "outcome": signal.outcome,
-                "side": signal.action,
-                "size": signal.size,
-                "price": fill_price,
-                "reason": signal.reason,
-            },
+        events.append(
             {
                 **fill,
                 "event_type": "order.filled",
                 "reason": signal.reason,
-            },
-        ])
+                "entry_style": fill_behavior["entry_style"],
+            }
+        )
         return {
             "opened": True,
+            "filled": True,
             "order_id": order_id,
             "events": events,
+            "entry_style": fill_behavior["entry_style"],
+            "fill_price": float(fill_price),
             "slot_state": asdict(slot_state),
         }
 

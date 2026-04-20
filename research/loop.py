@@ -237,8 +237,12 @@ def read_jsonl_tail(path: Path, limit: int | None = None) -> Iterable[Dict[str, 
         rows = []
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
         return rows
 
     tail: deque[Dict[str, Any]] = deque(maxlen=limit)
@@ -247,5 +251,9 @@ def read_jsonl_tail(path: Path, limit: int | None = None) -> Iterable[Dict[str, 
             line = line.strip()
             if not line:
                 continue
-            tail.append(json.loads(line))
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            tail.append(parsed)
     return list(tail)

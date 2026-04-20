@@ -184,6 +184,54 @@ class RestoreWorkflowTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await executor.__aexit__(None, None, None)
 
+    async def test_executor_signal_reversal_with_ledger_does_not_raise_keyerror(self):
+        fake_md = FakeMarketData(self.market)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = dict(self.config)
+            cfg["execution"] = dict(self.config["execution"])
+            cfg["execution"]["ledger_db_path"] = str(Path(tmpdir) / "ledger.db")
+            executor = PolymarketExecutor(cfg, fake_md, mode="paper", run_id="run-reversal-ledger")
+            await executor.__aenter__()
+            try:
+                open_book = self._orderbook(up_bid=0.48, up_ask=0.50, down_bid=0.50, down_ask=0.52, ts=101.0)
+                first_signal = Signal(
+                    market_id="m1",
+                    outcome="Up",
+                    action="BUY",
+                    price=0.50,
+                    confidence=0.9,
+                    size=10,
+                    reason="initial entry",
+                    book_quality={},
+                )
+                open_result = await executor.execute_signal_trade(self.market, open_book, first_signal)
+                self.assertTrue(open_result["opened"])
+                self.assertIn(self.market["slot_id"], executor.signal_slots)
+
+                reverse_book = self._orderbook(up_bid=0.46, up_ask=0.48, down_bid=0.52, down_ask=0.54, ts=110.0)
+                reverse_signal = Signal(
+                    market_id="m1",
+                    outcome="Down",
+                    action="BUY",
+                    price=0.54,
+                    confidence=0.95,
+                    size=10,
+                    reason="reversal",
+                    book_quality={},
+                )
+                reverse_result = await executor.execute_signal_trade(self.market, reverse_book, reverse_signal)
+
+                event_types = [event["event_type"] for event in reverse_result["events"]]
+                self.assertTrue(reverse_result["opened"])
+                self.assertIn("position.closed", event_types)
+                self.assertEqual(executor.signal_slots[self.market["slot_id"]].outcome, "Down")
+                self.assertAlmostEqual(
+                    executor.positions[("mean_reversion_5min", "m1", "Down")].quantity,
+                    10.0,
+                )
+            finally:
+                await executor.__aexit__(None, None, None)
+
     async def test_pending_resolution_backoff_marks_deferred(self):
         fake_md = FakeMarketData(self.market)
         executor = PolymarketExecutor(self.config, fake_md, mode="paper")
