@@ -44,6 +44,7 @@ import asyncio
 import tempfile
 import time
 import unittest
+from collections import Counter
 
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -51,6 +52,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from execution import PolymarketExecutor
+from ledger import SQLiteLedger
 from market_data import PolymarketData
 
 
@@ -128,6 +130,44 @@ def test_flat_market_emits_slot_closed():
         "slot_closed must NOT increment win_count"
     assert executor.loss_count == before_losses, \
         "slot_closed must NOT increment loss_count"
+
+
+def test_flat_market_pending_resolution_does_not_double_record_slot_settlement():
+    """Flat-at-expiry pending resolution should only emit/persist slot_closed."""
+    tmpdir = tempfile.TemporaryDirectory()
+    db_path = Path(tmpdir.name) / "ledger.db"
+    config = {
+        "polymarket": {"clob_api_url": "http://fake", "gamma_api_url": "http://fake"},
+        "execution": {
+            "paper_starting_bankroll": 500.0,
+            "resolution_initial_poll_seconds": 0,
+            "resolution_poll_cap_seconds": 10,
+        },
+    }
+    mock_md = MagicMock(spec=PolymarketData)
+    market_dict = _expired_market_dict(
+        slug="btc-updown-5m-110", end_ts=200.0, slot_id="btc:5:110", id="m-flat")
+
+    mock_md.get_market_by_slug = AsyncMock(return_value=market_dict)
+    mock_md.get_winning_outcome = MagicMock(return_value="Down")
+    mock_md.best_bid = MagicMock(return_value=0.0)
+    mock_md.best_ask = MagicMock(return_value=0.0)
+
+    executor = _make_executor(config, mock_md, run_id="test-flat-flow", ledger_db_path_override=str(db_path))
+    executor.market_registry["btc:5:110"] = market_dict
+
+    events = asyncio.run(executor.process_pending_resolutions(now_ts=200.0))
+    counts = Counter(event.get("event_type") for event in events)
+    ledger_counts = Counter(event.event_type for event in SQLiteLedger(db_path).list_events(run_id="test-flat-flow"))
+
+    assert counts["slot_closed"] == 1
+    assert counts["market.settled"] == 0
+    assert ledger_counts["slot_closed"] == 1
+    assert ledger_counts["slot_settled"] == 0
+    assert executor.latest_slot_resolution["event_type"] == "slot_closed"
+    assert executor.latest_slot_resolution["slot_id"] == "btc:5:110"
+    assert executor.latest_position_settlement is None
+    assert executor.latest_settlement is None
 
 
 # ──────────────────────────────────────────────────────────────

@@ -36,6 +36,8 @@ class ReplayProjection:
     breakeven_count: int = 0
     win_count: int = 0
     loss_count: int = 0
+    latest_slot_resolution: dict[str, Any] | None = None
+    latest_position_settlement: dict[str, Any] | None = None
     latest_settlement: dict[str, Any] | None = None
     realized_pnl_timeline: list[dict[str, float]] = field(default_factory=list)
     exposure: dict[str, Any] = field(default_factory=dict)
@@ -162,7 +164,11 @@ def _apply_slot_event(projection: ReplayProjection, event: LedgerEvent) -> None:
         projection.pending_slots.pop(slot_id, None)
         settled_payload = dict(event.payload)
         projection.settled_slots[slot_id] = settled_payload
-        projection.latest_settlement = {"slot_id": slot_id, **settled_payload}
+        slot_resolution = {"event_type": "slot_settled", "slot_id": slot_id, **settled_payload}
+        projection.latest_slot_resolution = slot_resolution
+        if _has_position_settlement_attribution(settled_payload):
+            projection.latest_position_settlement = dict(slot_resolution)
+        projection.latest_settlement = projection.latest_position_settlement
 
         market_id = settled_payload.get("market_id")
 
@@ -180,8 +186,20 @@ def _apply_slot_event(projection: ReplayProjection, event: LedgerEvent) -> None:
     if event.event_type == "slot_closed":
         # Flat-at-expiry lifecycle event — no positions to settle, just record
         projection.pending_slots.pop(slot_id, None)
-        projection.settled_slots[slot_id] = dict(event.payload)
+        closed_payload = dict(event.payload)
+        projection.settled_slots[slot_id] = closed_payload
+        projection.latest_slot_resolution = {"event_type": "slot_closed", "slot_id": slot_id, **closed_payload}
         return
+
+
+def _has_position_settlement_attribution(payload: dict[str, Any]) -> bool:
+    position_count = payload.get("position_count")
+    if position_count is not None and int(position_count) != 1:
+        return False
+    return any(
+        payload.get(field) is not None
+        for field in ("position_outcome", "position_size", "entry_price")
+    )
 
 
 def _apply_position_fill(projection: ReplayProjection, payload: dict[str, Any]) -> float:

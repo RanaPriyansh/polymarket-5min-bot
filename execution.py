@@ -24,6 +24,8 @@ from exposure import build_exposure_snapshot
 
 logger = logging.getLogger(__name__)
 
+OPEN_LIKE_CANCELLABLE_STATUSES = {"open", "partially_filled", "acknowledged"}
+
 
 @dataclass
 class FamilyPosition:
@@ -140,6 +142,8 @@ class PolymarketExecutor:
         self.breakeven_count: int = 0
         self.win_count: int = 0
         self.loss_count: int = 0
+        self.latest_slot_resolution: Optional[Dict] = None
+        self.latest_position_settlement: Optional[Dict] = None
         self.latest_settlement: Optional[Dict] = None
         ledger_path = execution_cfg.get("ledger_db_path")
         self.ledger = ledger or (SQLiteLedger(Path(ledger_path)) if ledger_path else None)
@@ -230,16 +234,12 @@ class PolymarketExecutor:
             projection.settled_slots.items(),
             key=lambda item: float(item[1].get("settled_ts", 0.0)),
         )
-        self.latest_settlement = None
-        if projection.latest_settlement is not None:
-            self.latest_settlement = {
-                "event_type": "market.settled",
-                **projection.latest_settlement,
-            }
-        elif settled:
+        self.latest_slot_resolution = None if projection.latest_slot_resolution is None else dict(projection.latest_slot_resolution)
+        self.latest_position_settlement = None if projection.latest_position_settlement is None else dict(projection.latest_position_settlement)
+        self.latest_settlement = None if self.latest_position_settlement is None else dict(self.latest_position_settlement)
+        if self.latest_slot_resolution is None and settled:
             slot_id, payload = settled[-1]
-            self.latest_settlement = {
-                "event_type": "market.settled",
+            self.latest_slot_resolution = {
                 "slot_id": slot_id,
                 **payload,
             }
@@ -592,7 +592,7 @@ class PolymarketExecutor:
 
     async def cancel_order(self, order_id: str):
         order = self.orders.get(order_id)
-        if not order or order.get("status") != "open":
+        if not order or order.get("status") not in OPEN_LIKE_CANCELLABLE_STATUSES:
             return False
 
         if self.mode == "live":
@@ -615,17 +615,25 @@ class PolymarketExecutor:
     async def cancel_family_market(self, market_id: str, strategy_family: str):
         to_cancel = [
             oid for oid, order in self.orders.items()
-            if order["market_id"] == market_id and order["strategy_family"] == strategy_family and order["status"] == "open"
+            if order["market_id"] == market_id and order["strategy_family"] == strategy_family and order["status"] in OPEN_LIKE_CANCELLABLE_STATUSES
         ]
+        cancelled_count = 0
         for oid in to_cancel:
-            await self.cancel_order(oid)
-        return len(to_cancel)
+            if await self.cancel_order(oid):
+                cancelled_count += 1
+        return cancelled_count
 
     async def cancel_market_orders(self, market_id: str) -> int:
-        to_cancel = [oid for oid, order in self.orders.items() if order["market_id"] == market_id and order["status"] == "open"]
+        to_cancel = [
+            oid
+            for oid, order in self.orders.items()
+            if order["market_id"] == market_id and order.get("status") in OPEN_LIKE_CANCELLABLE_STATUSES
+        ]
+        cancelled_count = 0
         for oid in to_cancel:
-            await self.cancel_order(oid)
-        return len(to_cancel)
+            if await self.cancel_order(oid):
+                cancelled_count += 1
+        return cancelled_count
 
     def fill_order(
         self,
@@ -1032,7 +1040,8 @@ class PolymarketExecutor:
                     "settled_ts": settled_ts,
                 }
                 settlement_events.append(event)
-                self.latest_settlement = event
+                self.latest_position_settlement = dict(event)
+                self.latest_settlement = dict(event)
         else:
             # Flat at expiry: emit slot_closed lifecycle event (no PnL).
             # This does NOT count as a resolved trade, win, or loss.
@@ -1047,6 +1056,15 @@ class PolymarketExecutor:
                 correlation_id=market["slot_id"],
             )
             self._persist_events(closed_evt)
+            self.latest_slot_resolution = {
+                "event_type": "slot_closed",
+                "slot_id": market["slot_id"],
+                "market_id": market["id"],
+                "market_slug": market["slug"],
+                "winning_outcome": winning_outcome,
+                "settled_ts": settled_ts,
+                "position_count": 0,
+            }
             settlement_events.append({
                 "event_type": "slot_closed",
                 "slot_id": market["slot_id"],
@@ -1174,34 +1192,51 @@ class PolymarketExecutor:
             events_delta = self._settle_market_positions(refreshed_market, winning_outcome, now_ts)
             events.extend(events_delta)
             settlement_pos_events = [e for e in events_delta if e.get("event_type") == "market.settled"]
-            # Sum up PnL across all positions settled for this slot
+            settled_position_count = len(settlement_pos_events)
             total_realized_pnl = sum(e.get("realized_pnl_delta", 0.0) for e in settlement_pos_events)
-            # For slot_settled we record the primary position (first one) if any
-            primary_pos = settlement_pos_events[0] if settlement_pos_events else None
-            self._persist_events(
-                self.settlement_engine.settled_event(
-                    slot_id=slot_id,
-                    market_id=refreshed_market["id"],
-                    market_slug=refreshed_market["slug"],
-                    winning_outcome=winning_outcome,
-                    settled_ts=now_ts,
-                    run_id=self.run_id,
-                    sequence_num=self._next_sequence("market_slot", slot_id),
-                    correlation_id=slot_id,
-                    position_outcome=primary_pos["outcome"] if primary_pos else None,
-                    position_size=abs(primary_pos["quantity"]) if primary_pos else None,
-                    entry_price=primary_pos["average_price"] if primary_pos else None,
-                    realized_pnl=round(total_realized_pnl, 6) if settlement_pos_events else None,
-                    is_win=1 if total_realized_pnl > 1e-6 else (0 if settlement_pos_events else None),
+            primary_pos = settlement_pos_events[0] if settled_position_count == 1 else None
+            if settlement_pos_events:
+                self._persist_events(
+                    self.settlement_engine.settled_event(
+                        slot_id=slot_id,
+                        market_id=refreshed_market["id"],
+                        market_slug=refreshed_market["slug"],
+                        winning_outcome=winning_outcome,
+                        settled_ts=now_ts,
+                        run_id=self.run_id,
+                        sequence_num=self._next_sequence("market_slot", slot_id),
+                        correlation_id=slot_id,
+                        position_count=settled_position_count,
+                        position_outcome=primary_pos["outcome"] if primary_pos else None,
+                        position_size=abs(primary_pos["quantity"]) if primary_pos else None,
+                        entry_price=primary_pos["average_price"] if primary_pos else None,
+                        realized_pnl=round(total_realized_pnl, 6),
+                        is_win=1 if total_realized_pnl > 1e-6 else 0,
+                    )
                 )
-            )
-            events.append({
-                "event_type": "market.settled",
-                "slot_id": slot_id,
-                "market_id": refreshed_market["id"],
-                "winning_outcome": winning_outcome,
-            })
-            logger.info("Settled %s: winning=%s", slot_id, winning_outcome)
+                self.latest_slot_resolution = {
+                    "event_type": "slot_settled",
+                    "slot_id": slot_id,
+                    "market_id": refreshed_market["id"],
+                    "market_slug": refreshed_market["slug"],
+                    "winning_outcome": winning_outcome,
+                    "settled_ts": now_ts,
+                    "position_count": settled_position_count,
+                    "position_outcome": primary_pos["outcome"] if primary_pos else None,
+                    "position_size": abs(primary_pos["quantity"]) if primary_pos else None,
+                    "entry_price": primary_pos["average_price"] if primary_pos else None,
+                    "realized_pnl": round(total_realized_pnl, 6),
+                    "is_win": 1 if total_realized_pnl > 1e-6 else 0,
+                }
+                events.append({
+                    "event_type": "market.settled",
+                    "slot_id": slot_id,
+                    "market_id": refreshed_market["id"],
+                    "winning_outcome": winning_outcome,
+                })
+                logger.info("Settled %s: winning=%s", slot_id, winning_outcome)
+            else:
+                logger.info("Closed %s flat at expiry: winning=%s", slot_id, winning_outcome)
         return events
 
     def get_family_metrics(self) -> Dict[str, Dict]:
@@ -1283,7 +1318,9 @@ class PolymarketExecutor:
         projection.resolved_trade_count = int(self.resolved_trade_count)
         projection.win_count = int(self.win_count)
         projection.loss_count = int(self.loss_count)
-        projection.latest_settlement = None if self.latest_settlement is None else dict(self.latest_settlement)
+        projection.latest_slot_resolution = None if self.latest_slot_resolution is None else dict(self.latest_slot_resolution)
+        projection.latest_position_settlement = None if self.latest_position_settlement is None else dict(self.latest_position_settlement)
+        projection.latest_settlement = None if self.latest_position_settlement is None else dict(self.latest_position_settlement)
         for key, position in self.positions.items():
             projection.positions[key] = {
                 "slot_id": None,
@@ -1438,7 +1475,9 @@ class PolymarketExecutor:
             "win_rate": (win_count / resolved_trade_count) if resolved_trade_count else 0.0,
             "active_slots": active_slots,
             "pending_resolution_slots": pending_slots,
-            "latest_settlement": projection.latest_settlement or self.latest_settlement,
+            "latest_slot_resolution": projection.latest_slot_resolution or self.latest_slot_resolution,
+            "latest_position_settlement": projection.latest_position_settlement or self.latest_position_settlement,
+            "latest_settlement": projection.latest_position_settlement or self.latest_position_settlement,
             "realized_pnl_total": float(projection.realized_pnl_total),
             "unrealized_pnl_total": float(projection.exposure.get("unrealized_pnl_total", 0.0)),
             "marked_position_count": int(projection.exposure.get("marked_position_count", 0)),

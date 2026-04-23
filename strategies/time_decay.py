@@ -17,7 +17,7 @@ from market_data import OrderBook
 from tradeability_policy import assess_tradeability
 
 
-@dataclass  
+@dataclass
 class Signal:
     market_id: str
     outcome: str
@@ -36,6 +36,26 @@ class TimeDecay:
         self.min_seconds_left = params.get("min_seconds_left", 10)
         self.max_seconds_left = params.get("max_seconds_left", 60)
         self.min_price = params.get("min_price", 0.55)
+        self.max_price = params.get("max_price", 0.92)
+        self.min_notional_usd = params.get("min_notional_usd", 1.0)
+        self.max_notional_usd = params.get("max_notional_usd", 6.0)
+        self._fired_slots: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def _clamp(value: float, lower: float, upper: float) -> float:
+        if upper < lower:
+            lower, upper = upper, lower
+        return max(lower, min(value, upper))
+
+    def _slot_key(self, market_id: str, market: dict, orderbook: OrderBook, outcome: str) -> tuple[str, str]:
+        slot_id = str(market.get("slot_id") or getattr(orderbook, "slot_id", "") or market_id)
+        return (slot_id, outcome)
+
+    def mark_fired(self, slot_id: str, outcome: str) -> None:
+        self._fired_slots.add((str(slot_id), str(outcome)))
+
+    def mark_signal_fired(self, market_id: str, market: dict, orderbook: OrderBook, outcome: str) -> None:
+        self._fired_slots.add(self._slot_key(market_id, market, orderbook, outcome))
 
     def generate_signal(self, market_id: str, market: dict, orderbook: OrderBook,
                        current_time: float) -> Optional[Signal]:
@@ -45,10 +65,6 @@ class TimeDecay:
 
         seconds_left = end_ts - current_time
         if seconds_left < self.min_seconds_left or seconds_left > self.max_seconds_left:
-            return None
-
-        quality = assess_tradeability(self.config, "time_decay", orderbook, orderbook.outcome_labels[0])
-        if not quality.is_tradeable:
             return None
 
         # Check both outcomes
@@ -63,8 +79,16 @@ class TimeDecay:
             if not bids or not asks:
                 continue
 
+            quality = assess_tradeability(self.config, "time_decay", orderbook, outcome)
+            if not quality.is_tradeable:
+                continue
+
             mid = (bids[0][0] + asks[0][0]) / 2
-            if mid < self.min_price:
+            if mid < self.min_price or mid > self.max_price:
+                continue
+
+            slot_key = self._slot_key(market_id, market, orderbook, outcome)
+            if slot_key in self._fired_slots:
                 continue
 
             # Discount: if mid=0.70, buy at 0.695 (0.5% below mid)
@@ -75,13 +99,21 @@ class TimeDecay:
             urgency = max(0, 1 - (seconds_left / self.max_seconds_left))
             confidence = min((mid - 0.5) * 2 * (1 + urgency), 0.95)
 
+            min_size = self.min_notional_usd / buy_price if buy_price > 0 else 0.0
+            max_size = self.max_notional_usd / buy_price if buy_price > 0 else 0.0
+            base_size = self._clamp(min_size, 1.0, max_size)
+            confidence_scaled_size = base_size * (0.5 + 0.5 * confidence)
+            final_size = max(confidence_scaled_size, min_size)
+            if max_size > 0:
+                final_size = min(final_size, max_size)
+
             sig = Signal(
                 market_id=market_id,
                 outcome=outcome,
                 action="BUY",
                 price=buy_price,
                 confidence=confidence,
-                size=5.0,
+                size=final_size,
                 reason=f"Time decay: {outcome}={mid:.4f} with {seconds_left:.0f}s left, urgency={urgency:.2f}",
                 book_quality=quality.to_dict(),
             )

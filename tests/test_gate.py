@@ -98,6 +98,15 @@ class GateTests(unittest.TestCase):
             "A reason must mention 'circuit_breaker' (case-insensitive)",
         )
 
+    def test_red_collects_hard_stop_reason_alongside_low_win_rate(self):
+        inputs = _base_inputs(win_rate=0.03, resolved_count=65, contradiction_log_open=1)
+        state, reasons = compute_gate_state(inputs)
+
+        self.assertEqual(state, "RED")
+        reason_text = " ".join(reasons).lower()
+        self.assertIn("win_rate", reason_text)
+        self.assertIn("contradiction_log_open", reason_text)
+
     def test_red_blocks_experiments(self):
         """
         Integration: RED gate must block experiment emission.

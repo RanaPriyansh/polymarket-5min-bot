@@ -59,7 +59,7 @@ class AutoresearchAndEdgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((artifact_dir / "latest.json").exists())
             self.assertTrue((artifact_dir / "latest.md").exists())
             timestamped_json = sorted(
-                path for path in artifact_dir.glob("*.json") if path.name != "latest.json"
+                path for path in artifact_dir.glob("*.json") if path.name not in {"latest.json", "family_scoreboard.json"}
             )
             self.assertEqual(len(timestamped_json), 1)
             latest_payload = json.loads((artifact_dir / "latest.json").read_text(encoding="utf-8"))

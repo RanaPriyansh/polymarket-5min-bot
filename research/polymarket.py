@@ -15,6 +15,7 @@ from research.loop import (
     make_cycle_id,
 )
 from runtime_telemetry import RuntimeTelemetry
+from research.experiment_registry import build_family_scoreboard, verdict_from_scoreboard, write_family_scoreboard
 
 
 class PolymarketRuntimeResearchAdapter(ResearchAdapter):
@@ -26,7 +27,7 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
     def run(self) -> ResearchCycleResult:
         status = self.telemetry.read_status()
         metrics = self.telemetry.read_strategy_metrics()
-        events = self.telemetry.read_events(limit=500, run_id=self.run_id)
+        events = self.telemetry.read_events(limit=5000, run_id=self.run_id)
         samples = self.telemetry.read_market_samples(limit=self.sample_limit, run_id=self.run_id)
 
         hypotheses: List[ResearchHypothesis] = []
@@ -36,6 +37,17 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
 
         baseline_strategy = status.get("baseline_strategy")
         research_candidates = status.get("research_candidates", []) or []
+        active_families = status.get("active_strategy_families") or status.get("strategies") or []
+        runtime_path = self.telemetry.runtime_dir
+        research_artifact_dir = runtime_path.parent / "research" if runtime_path.name == "runtime" else runtime_path / "research"
+        family_scoreboard = build_family_scoreboard(
+            events,
+            active_families=active_families,
+            candidate_families=research_candidates,
+            run_fragmentation=int(status.get("run_lineage_fragmentation", 1) or 1),
+        )
+        write_family_scoreboard(research_artifact_dir, family_scoreboard)
+        family_verdict = verdict_from_scoreboard(family_scoreboard)
 
         family_summaries = self._family_summaries(metrics)
         skip_counter = self._skip_counter(samples)
@@ -97,6 +109,19 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
                     },
                 )
             )
+
+        if family_scoreboard:
+            scoreboard_payload = [row.to_dict() for row in family_scoreboard]
+            insights.append(
+                ResearchInsight(
+                    title="72h experiment family scoreboard",
+                    observation=f"Verdict: {family_verdict}.",
+                    recommendation="Autopromote only families crossing settled-trade, win-rate, and pnl-per-trade thresholds; autodemote families with enough bad settled evidence.",
+                    confidence=0.88,
+                    evidence={"verdict": family_verdict, "families": scoreboard_payload},
+                )
+            )
+            next_actions.append(f"[AUTORESEARCH VERDICT] {family_verdict}")
 
         if skip_counter:
             top_reason, top_count = skip_counter.most_common(1)[0]
@@ -227,6 +252,8 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
                 "events_analyzed": len(events),
                 "samples_analyzed": len(samples),
                 "fill_events": len(fill_events),
+                "family_scoreboard": [row.to_dict() for row in family_scoreboard],
+                "family_verdict": family_verdict,
             },
             context=ResearchContext(
                 source="live-runtime-artifacts",

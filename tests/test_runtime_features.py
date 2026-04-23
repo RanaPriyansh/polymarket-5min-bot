@@ -92,6 +92,12 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
                 "market_id": "m3",
                 "realized_pnl_delta": 2.5,
             })
+            telemetry.append_event("slot_settled", {
+                "strategy_family": "mean_reversion_5min",
+                "market_id": "m3",
+                "realized_pnl": 2.5,
+                "is_win": True,
+            })
             telemetry.append_market_sample({
                 "market_id": "m3",
                 "book_reasons": ["wide_spread>250"],
@@ -106,6 +112,12 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
             with open(report_path, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
             self.assertEqual(payload["source"], "live-runtime-artifacts")
+            self.assertIn("family_verdict", payload["raw_context"])
+            scoreboard_path = Path(tmpdir) / "research" / "family_scoreboard.json"
+            self.assertTrue(scoreboard_path.exists())
+            scoreboard = json.loads(scoreboard_path.read_text(encoding="utf-8"))
+            self.assertEqual(scoreboard[0]["family"], "mean_reversion_5min")
+            self.assertEqual(scoreboard[0]["settled_trades"], 1)
 
     async def test_status_utils_render_runtime_summary_and_health(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -126,6 +138,7 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
                 phase="running",
                 mode="paper",
                 baseline_strategy="toxicity_mm",
+                active_strategy_families=["toxicity_mm"],
                 research_candidates=["mean_reversion_5min", "opening_range", "time_decay"],
                 loop_count=7,
                 fetched_markets=8,
@@ -137,7 +150,17 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
                 win_rate=0.5,
                 gate_state="RED",
                 gate_reasons=["win_rate=0.090 < 0.20 with resolved_count=35 >= 20"],
-                new_order_pause=True,
+                new_order_pause=False,
+                pause_policy="family-aware",
+                pause_scope="no_active_families_paused",
+                pause_reason="mm_exempt_low_win_rate_only",
+                pause_family_decisions={
+                    "toxicity_mm": {
+                        "pause": False,
+                        "reason": "mm_exempt_low_win_rate_only",
+                        "blocking_gate_reasons": [],
+                    }
+                },
                 risk={
                     "capital": 501.25,
                     "daily_pnl": 1.25,
@@ -154,13 +177,47 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Run id: paper-test", rendered)
             self.assertIn("Baseline strategy: toxicity_mm", rendered)
             self.assertIn("Research candidates: mean_reversion_5min, opening_range, time_decay", rendered)
-            self.assertIn("Runtime gate: RED | New orders paused: True", rendered)
+            self.assertIn("Runtime gate: RED | New orders paused: False", rendered)
             self.assertIn("Gate reasons: win_rate=0.090 < 0.20 with resolved_count=35 >= 20", rendered)
+            self.assertIn("Pause policy: family-aware | Scope: no_active_families_paused | Reason: mm_exempt_low_win_rate_only", rendered)
+            self.assertIn("Family-aware pause detail: toxicity_mm=active (mm_exempt_low_win_rate_only)", rendered)
             self.assertIn("Strategy metrics:", rendered)
             self.assertIn("toxicity_mm", rendered)
             self.assertTrue(Path(tmpdir, "latest-status.txt").exists())
             health = runtime_health_payload(tmpdir, max_heartbeat_age=180)
             self.assertTrue(health["healthy"])
+
+    async def test_runtime_telemetry_renders_mixed_family_pause_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            telemetry = RuntimeTelemetry(tmpdir)
+            telemetry.update_status(
+                run_id="paper-mixed",
+                phase="running",
+                mode="paper",
+                active_strategy_families=["toxicity_mm", "opening_range"],
+                loop_count=8,
+                gate_state="RED",
+                gate_reasons=["win_rate=0.090 < 0.20 with resolved_count=35 >= 20"],
+                new_order_pause=False,
+                pause_policy="family-aware",
+                pause_scope="mixed_by_family",
+                pause_reason="mixed_by_family",
+                pause_family_decisions={
+                    "opening_range": {
+                        "pause": True,
+                        "reason": "directional_low_win_rate_red_gate",
+                        "blocking_gate_reasons": ["win_rate=0.090 < 0.20 with resolved_count=35 >= 20"],
+                    },
+                    "toxicity_mm": {
+                        "pause": False,
+                        "reason": "mm_exempt_low_win_rate_only",
+                        "blocking_gate_reasons": [],
+                    },
+                },
+            )
+            rendered = render_status_text(tmpdir)
+            self.assertIn("Pause policy: family-aware | Scope: mixed_by_family | Reason: mixed_by_family", rendered)
+            self.assertIn("Family-aware pause detail: opening_range=paused (directional_low_win_rate_red_gate); toxicity_mm=active (mm_exempt_low_win_rate_only)", rendered)
 
     async def test_runtime_telemetry_treats_empty_status_file_as_empty_dict(self):
         with tempfile.TemporaryDirectory() as tmpdir:

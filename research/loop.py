@@ -3,10 +3,9 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Protocol
+from typing import Any, Callable, Dict, Iterable, List, Protocol
 
 from research.gate import build_gate_inputs, compute_gate_state
 
@@ -161,6 +160,9 @@ class ResearchLoop:
         ]
         if result.top_recommendation:
             lines.extend(["", f"Top recommendation: {result.top_recommendation}"])
+        family_verdict = result.raw_context.get("family_verdict")
+        if family_verdict:
+            lines.extend(["", f"Verdict: {family_verdict}"])
         if result.next_actions:
             lines.extend(["", "## Next actions"])
             for action in result.next_actions:
@@ -210,7 +212,7 @@ class ResearchLoop:
     def _timestamped_files(self, pattern: str) -> List[Path]:
         files = [
             path for path in self.artifact_dir.glob(pattern)
-            if path.name not in {"latest.json", "latest.md"}
+            if path.name not in {"latest.json", "latest.md", "family_scoreboard.json"}
         ]
         return sorted(files, key=lambda p: p.stat().st_mtime)
 
@@ -230,7 +232,30 @@ class ResearchLoop:
         return json.loads(path.read_text(encoding="utf-8"))
 
 
-def read_jsonl_tail(path: Path, limit: int | None = None) -> Iterable[Dict[str, Any]]:
+def _iter_file_lines_reverse(path: Path, *, block_size: int = 8192) -> Iterable[bytes]:
+    with path.open("rb") as fh:
+        fh.seek(0, 2)
+        position = fh.tell()
+        buffer = b""
+        while position > 0:
+            read_size = min(block_size, position)
+            position -= read_size
+            fh.seek(position)
+            chunk = fh.read(read_size)
+            buffer = chunk + buffer
+            lines = buffer.split(b"\n")
+            buffer = lines[0]
+            for line in reversed(lines[1:]):
+                yield line
+        if buffer:
+            yield buffer
+
+
+def read_jsonl_tail(
+    path: Path,
+    limit: int | None = None,
+    row_filter: Callable[[Dict[str, Any]], bool] | None = None,
+) -> Iterable[Dict[str, Any]]:
     if not path.exists():
         return []
     if limit is None:
@@ -240,20 +265,30 @@ def read_jsonl_tail(path: Path, limit: int | None = None) -> Iterable[Dict[str, 
             if not line:
                 continue
             try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return rows
-
-    tail: deque[Dict[str, Any]] = deque(maxlen=limit)
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
                 parsed = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            tail.append(parsed)
-    return list(tail)
+            if row_filter is not None and not row_filter(parsed):
+                continue
+            rows.append(parsed)
+        return rows
+    if limit <= 0:
+        return []
+
+    tail: list[Dict[str, Any]] = []
+    for raw_line in _iter_file_lines_reverse(path):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            decoded = line.decode("utf-8")
+            parsed = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if row_filter is not None and not row_filter(parsed):
+            continue
+        tail.append(parsed)
+        if len(tail) >= limit:
+            break
+    tail.reverse()
+    return tail

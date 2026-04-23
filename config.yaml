@@ -31,15 +31,15 @@ execution:
   resolution_initial_poll_seconds: 10
   resolution_poll_cap_seconds: 300
 strategies:
-  # Only toxicity_mm is promoted to active. The others are research
-  # candidates — keep them wired and tested, but only enable them once
-  # runtime evidence earns promotion. See PLAN.md § strategy evolution.
+  # toxicity_mm remains the baseline maker; time_decay is active with
+  # tightly bounded endgame sizing so runtime/autoresearch can attribute PnL.
   active:
   - toxicity_mm
+  - time_decay
   candidates:
   - mean_reversion_5min
   - opening_range
-  - time_decay
+  - spot_momentum
   mean_reversion_5min:
     deviation_threshold: 0.03
     ema_period: 20
@@ -54,6 +54,7 @@ strategies:
   toxicity_mm:
     kelly_fraction: 0.2
     max_position: 1000
+    min_seconds_to_expiry_for_new_orders: 30
     spread_multiplier: 1.5
     timeframes:
     - 5m
@@ -68,7 +69,20 @@ strategies:
     min_seconds_left: 10
     max_seconds_left: 60
     min_price: 0.55
+    max_price: 0.92
+    min_notional_usd: 1.0
+    max_notional_usd: 6.0
+    directional_signal_entry_style: resting_limit
     min_seconds_to_expiry_for_new_orders: 0
+  spot_momentum:
+    min_abs_spot_move_pct: 0.20
+    min_tte_pct: 0.20
+    max_tte_pct: 0.70
+    max_entry_price: 0.70
+    base_notional_usd: 2.0
+    move_notional_multiplier: 4.0
+    max_notional_usd: 6.0
+    directional_signal_entry_style: resting_limit
 runtime:
   dir: data/runtime
 telegram:

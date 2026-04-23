@@ -72,6 +72,10 @@ class ExecutionSignalPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_strategy_directional_signal_entry_style(cfg, "opening_range"), "resting_limit")
         self.assertEqual(_strategy_directional_signal_entry_style(cfg, "mean_reversion_5min"), "marketable")
 
+    def test_time_decay_strategy_override_uses_resting_limit_despite_marketable_global_default(self):
+        cfg = self._config(global_style="marketable", strategy_styles={"time_decay": "resting_limit"})
+        self.assertEqual(_strategy_directional_signal_entry_style(cfg, "time_decay"), "resting_limit")
+
     def test_resolve_signal_fill_behavior_defaults_to_marketable(self):
         behavior = resolve_signal_fill_behavior(
             self._config(),
@@ -226,6 +230,101 @@ class ExecutionSignalPolicyTests(unittest.IsolatedAsyncioTestCase):
             executor._rebuild_signal_slots_from_orders()
             self.assertIn("btc:5:100", executor.signal_slots)
             self.assertEqual(executor.signal_slots["btc:5:100"].strategy_family, "time_decay")
+        finally:
+            await executor.__aexit__(None, None, None)
+
+    async def test_cancel_order_cancels_open_like_statuses_only(self):
+        executor = PolymarketExecutor(self._config(), FakeMarketData(), mode="paper")
+        await executor.__aenter__()
+        try:
+            open_like_ids = []
+            for status in ("open", "partially_filled", "acknowledged"):
+                order_id = await executor.place_order(
+                    "m1", "Up", "BUY", 2.0, 0.60, strategy_family="toxicity_mm", market=self._market()
+                )
+                executor.orders[order_id]["status"] = status
+                open_like_ids.append(order_id)
+
+            final_ids = []
+            for status in ("filled", "cancelled", "rejected"):
+                order_id = await executor.place_order(
+                    "m1", "Up", "BUY", 2.0, 0.60, strategy_family="toxicity_mm", market=self._market()
+                )
+                executor.orders[order_id]["status"] = status
+                final_ids.append(order_id)
+
+            for order_id in open_like_ids:
+                self.assertTrue(await executor.cancel_order(order_id))
+                self.assertEqual(executor.orders[order_id]["status"], "cancelled")
+
+            for order_id in final_ids:
+                self.assertFalse(await executor.cancel_order(order_id))
+
+            self.assertEqual([executor.orders[order_id]["status"] for order_id in final_ids], ["filled", "cancelled", "rejected"])
+            self.assertEqual(executor.family_metrics["toxicity_mm"]["cancellations"], 3)
+        finally:
+            await executor.__aexit__(None, None, None)
+
+    async def test_cancel_family_market_actually_cancels_partially_filled_and_acknowledged_orders(self):
+        executor = PolymarketExecutor(self._config(), FakeMarketData(), mode="paper")
+        await executor.__aenter__()
+        try:
+            order_ids = []
+            for status in ("open", "partially_filled", "acknowledged"):
+                order_id = await executor.place_order(
+                    "m1", "Up", "BUY", 2.0, 0.60, strategy_family="toxicity_mm", market=self._market()
+                )
+                executor.orders[order_id]["status"] = status
+                order_ids.append(order_id)
+            filled_order_id = await executor.place_order(
+                "m1", "Up", "BUY", 2.0, 0.60, strategy_family="toxicity_mm", market=self._market()
+            )
+            executor.orders[filled_order_id]["status"] = "filled"
+
+            cancelled = await executor.cancel_family_market("m1", "toxicity_mm")
+
+            self.assertEqual(cancelled, 3)
+            self.assertTrue(all(executor.orders[order_id]["status"] == "cancelled" for order_id in order_ids))
+            self.assertEqual(executor.orders[filled_order_id]["status"], "filled")
+            self.assertEqual(executor.family_metrics["toxicity_mm"]["cancellations"], 3)
+        finally:
+            await executor.__aexit__(None, None, None)
+
+    async def test_cancel_market_orders_cancels_open_like_statuses_only_and_returns_actual_count(self):
+        executor = PolymarketExecutor(self._config(), FakeMarketData(), mode="paper")
+        await executor.__aenter__()
+        try:
+            cancellable_ids = []
+            for status in ("open", "partially_filled", "acknowledged"):
+                order_id = await executor.place_order(
+                    "m1", "Up", "BUY", 2.0, 0.60, strategy_family="toxicity_mm", market=self._market()
+                )
+                executor.orders[order_id]["status"] = status
+                cancellable_ids.append(order_id)
+
+            final_ids = []
+            for status in ("filled", "cancelled", "rejected"):
+                order_id = await executor.place_order(
+                    "m1", "Up", "BUY", 2.0, 0.60, strategy_family="toxicity_mm", market=self._market()
+                )
+                executor.orders[order_id]["status"] = status
+                final_ids.append(order_id)
+
+            other_market_id = await executor.place_order(
+                "m2", "Up", "BUY", 2.0, 0.60, strategy_family="toxicity_mm", market={**self._market(), "id": "m2"}
+            )
+            executor.orders[other_market_id]["status"] = "open"
+
+            cancelled = await executor.cancel_market_orders("m1")
+
+            self.assertEqual(cancelled, 3)
+            self.assertTrue(all(executor.orders[order_id]["status"] == "cancelled" for order_id in cancellable_ids))
+            self.assertEqual(
+                [executor.orders[order_id]["status"] for order_id in final_ids],
+                ["filled", "cancelled", "rejected"],
+            )
+            self.assertEqual(executor.orders[other_market_id]["status"], "open")
+            self.assertEqual(executor.family_metrics["toxicity_mm"]["cancellations"], 3)
         finally:
             await executor.__aexit__(None, None, None)
 

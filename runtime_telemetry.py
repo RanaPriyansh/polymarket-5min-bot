@@ -4,10 +4,26 @@ import json
 import shutil
 import time
 import uuid
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from research.loop import read_jsonl_tail
+
+
+_STRUCTURAL_EVENT_TYPES = {"market.runtime_baseline_untradeable"}
+_GOVERNANCE_EVENT_TYPES = {"market.entry_blocked"}
+_QUOTED_OR_ENTERED_EVENT_TYPES = {"quote.submitted", "order.opened", "order.filled", "signal.executed"}
+_QUOTE_SKIP_EVENT_TYPES = {"quote.skipped"}
+_DISCOVERY_ONLY_EVENT_TYPES = {"market.discovered", "market.fetch_error"}
+_BOUNDED_RECENT_RUN_SCOPE = "bounded_recent_run"
+_DISCOVERED_MARKET_EVENT_TYPES = (
+    _STRUCTURAL_EVENT_TYPES
+    | _GOVERNANCE_EVENT_TYPES
+    | _QUOTED_OR_ENTERED_EVENT_TYPES
+    | _QUOTE_SKIP_EVENT_TYPES
+    | _DISCOVERY_ONLY_EVENT_TYPES
+)
 
 
 class RuntimeTelemetry:
@@ -34,6 +50,7 @@ class RuntimeTelemetry:
         }
         with self.events_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+        self._invalidate_market_eligibility_snapshot()
 
     def append_market_sample(self, payload: Dict, *, run_id: str | None = None) -> None:
         resolved_run_id = run_id or payload.get("run_id") or self.current_run_id()
@@ -44,10 +61,28 @@ class RuntimeTelemetry:
         }
         with self.market_samples_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(sample, sort_keys=True, default=str) + "\n")
+        self._invalidate_market_eligibility_snapshot()
+
+    def _invalidate_market_eligibility_snapshot(self) -> None:
+        current = self.read_json(self.status_path)
+        if not isinstance(current, dict) or "market_eligibility" not in current:
+            return
+        current.pop("market_eligibility", None)
+        current["market_eligibility_stale"] = True
+        self.status_path.write_text(json.dumps(current, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        self.latest_status_text_path.write_text(self._render_latest_status_text(current), encoding="utf-8")
 
     def update_status(self, **fields) -> Dict:
         current = self.read_json(self.status_path) or {}
         current.update(fields)
+        if not isinstance(fields.get("market_eligibility"), dict):
+            resolved_run_id = str(current.get("run_id")) if current.get("run_id") else None
+            discovered_markets = current.get("fetched_markets")
+            current["market_eligibility"] = self.summarize_market_eligibility(
+                run_id=resolved_run_id,
+                discovered_markets=int(discovered_markets) if discovered_markets is not None else None,
+            )
+        current.pop("market_eligibility_stale", None)
         current["heartbeat_ts"] = time.time()
         self.status_path.write_text(json.dumps(current, indent=2, sort_keys=True, default=str), encoding="utf-8")
         self.latest_status_text_path.write_text(self._render_latest_status_text(current), encoding="utf-8")
@@ -96,16 +131,249 @@ class RuntimeTelemetry:
         return None
 
     def read_jsonl(self, path: Path, limit: Optional[int] = None, run_id: str | None = None) -> Iterable[Dict]:
-        rows = list(read_jsonl_tail(path, limit=limit))
-        if run_id is None:
-            return rows
-        return [row for row in rows if self._row_run_id(row) == run_id]
+        row_filter = None if run_id is None else lambda row: self._row_run_id(row) == run_id
+        return list(read_jsonl_tail(path, limit=limit, row_filter=row_filter))
 
     def read_events(self, limit: Optional[int] = None, run_id: str | None = None):
         return list(self.read_jsonl(self.events_path, limit=limit, run_id=run_id))
 
     def read_market_samples(self, limit: Optional[int] = None, run_id: str | None = None):
         return list(self.read_jsonl(self.market_samples_path, limit=limit, run_id=run_id))
+
+    @staticmethod
+    def _market_key(payload: Dict[str, Any]) -> str | None:
+        market_id = payload.get("market_id")
+        if market_id:
+            return str(market_id)
+        market_slug = payload.get("market_slug")
+        if market_slug:
+            return f"slug:{market_slug}"
+        slot_id = payload.get("slot_id")
+        if slot_id:
+            return f"slot:{slot_id}"
+        return None
+
+    @staticmethod
+    def _market_alias_tokens(payload: Dict[str, Any]) -> list[str]:
+        tokens: list[str] = []
+        market_id = payload.get("market_id")
+        market_slug = payload.get("market_slug")
+        slot_id = payload.get("slot_id")
+        if market_id:
+            tokens.append(f"id:{market_id}")
+        if market_slug:
+            tokens.append(f"slug:{market_slug}")
+        if slot_id:
+            tokens.append(f"slot:{slot_id}")
+        return tokens
+
+    @classmethod
+    def _market_alias_map(cls, payloads: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+        parent: Dict[str, str] = {}
+
+        def find(token: str) -> str:
+            root = parent.setdefault(token, token)
+            while parent[root] != root:
+                parent[root] = parent[parent[root]]
+                root = parent[root]
+            while token != root:
+                next_token = parent[token]
+                parent[token] = root
+                token = next_token
+            return root
+
+        def union(left: str, right: str) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            tokens = cls._market_alias_tokens(payload)
+            for token in tokens:
+                parent.setdefault(token, token)
+            if len(tokens) < 2:
+                continue
+            first = tokens[0]
+            for token in tokens[1:]:
+                union(first, token)
+
+        components: Dict[str, list[str]] = {}
+        for token in list(parent):
+            components.setdefault(find(token), []).append(token)
+
+        alias_map: Dict[str, str] = {}
+
+        def preference(token: str) -> tuple[int, str]:
+            if token.startswith("id:"):
+                return (0, token)
+            if token.startswith("slug:"):
+                return (1, token)
+            return (2, token)
+
+        for tokens in components.values():
+            canonical = min(tokens, key=preference)
+            for token in tokens:
+                alias_map[token] = canonical
+        return alias_map
+
+    @classmethod
+    def _canonical_market_key(cls, payload: Dict[str, Any], alias_map: Dict[str, str] | None = None) -> str | None:
+        tokens = cls._market_alias_tokens(payload)
+        if not tokens:
+            return None
+        if alias_map:
+            for token in tokens:
+                canonical = alias_map.get(token)
+                if canonical:
+                    return canonical
+        return tokens[0]
+
+    @staticmethod
+    def _reason_counter(events: Iterable[Dict[str, Any]]) -> Counter[str]:
+        counter: Counter[str] = Counter()
+        for event in events:
+            payload = event.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
+            reasons = payload.get("reasons") or []
+            if isinstance(reasons, str):
+                reasons = [reasons]
+            for reason in reasons:
+                normalized = str(reason).strip()
+                if normalized:
+                    counter[normalized] += 1
+        return counter
+
+    @classmethod
+    def _market_keys_from_rows(cls, rows: Iterable[Dict[str, Any]]) -> set[str]:
+        return {
+            key
+            for row in rows
+            for key in [cls._canonical_market_key((row.get("payload") or {}))]
+            if key is not None
+        }
+
+    @classmethod
+    def _market_keys_from_samples(cls, rows: Iterable[Dict[str, Any]]) -> set[str]:
+        return {
+            key
+            for row in rows
+            for key in [cls._canonical_market_key(row if isinstance(row, dict) else {})]
+            if key is not None
+        }
+
+    @classmethod
+    def _market_keys_from_rows_with_aliases(
+        cls,
+        rows: Iterable[Dict[str, Any]],
+        alias_map: Dict[str, str],
+    ) -> set[str]:
+        return {
+            key
+            for row in rows
+            for key in [cls._canonical_market_key((row.get("payload") or {}), alias_map)]
+            if key is not None
+        }
+
+    @classmethod
+    def _market_keys_from_samples_with_aliases(
+        cls,
+        rows: Iterable[Dict[str, Any]],
+        alias_map: Dict[str, str],
+    ) -> set[str]:
+        return {
+            key
+            for row in rows
+            for key in [cls._canonical_market_key(row if isinstance(row, dict) else {}, alias_map)]
+            if key is not None
+        }
+
+    @classmethod
+    def summarize_market_eligibility_events(
+        cls,
+        events: Iterable[Dict[str, Any]],
+        *,
+        market_samples: Iterable[Dict[str, Any]] | None = None,
+        discovered_market_keys: Iterable[str] | None = None,
+        discovered_markets: int | None = None,
+        top_n: int = 3,
+    ) -> Dict[str, Any]:
+        event_rows = list(events)
+        sample_rows = list(market_samples or [])
+        structural_events = [event for event in event_rows if event.get("event_type") in _STRUCTURAL_EVENT_TYPES]
+        governance_events = [event for event in event_rows if event.get("event_type") in _GOVERNANCE_EVENT_TYPES]
+        quoted_or_entered_events = [event for event in event_rows if event.get("event_type") in _QUOTED_OR_ENTERED_EVENT_TYPES]
+        quote_skip_events = [event for event in event_rows if event.get("event_type") in _QUOTE_SKIP_EVENT_TYPES]
+
+        alias_map = cls._market_alias_map(
+            [(row.get("payload") or {}) for row in event_rows if isinstance(row, dict)]
+            + [row for row in sample_rows if isinstance(row, dict)]
+        )
+
+        structural_market_keys = cls._market_keys_from_rows_with_aliases(structural_events, alias_map)
+        governance_market_keys = cls._market_keys_from_rows_with_aliases(governance_events, alias_map)
+        quoted_or_entered_market_keys = cls._market_keys_from_rows_with_aliases(quoted_or_entered_events, alias_map)
+        inferred_discovered_market_keys = cls._market_keys_from_rows_with_aliases(
+            (event for event in event_rows if event.get("event_type") in _DISCOVERED_MARKET_EVENT_TYPES),
+            alias_map,
+        )
+        supplied_discovered_market_keys = cls._market_keys_from_samples_with_aliases(sample_rows, alias_map)
+        supplied_discovered_market_keys.update(
+            str(key).strip() for key in (discovered_market_keys or []) if str(key).strip()
+        )
+
+        structural_reason_counts = cls._reason_counter(structural_events)
+        governance_reason_counts = cls._reason_counter(governance_events)
+        quote_skip_reason_counts = cls._reason_counter(quote_skip_events)
+
+        inferred_discovered = len(inferred_discovered_market_keys)
+        if supplied_discovered_market_keys:
+            resolved_discovered = len(supplied_discovered_market_keys | inferred_discovered_market_keys)
+        elif discovered_markets is not None:
+            resolved_discovered = max(int(discovered_markets), inferred_discovered)
+        else:
+            resolved_discovered = inferred_discovered
+
+        return {
+            "discovered_markets": max(resolved_discovered, 0),
+            "structurally_untradeable_markets": len(structural_market_keys),
+            "governance_blocked_markets": len(governance_market_keys),
+            "quoted_or_entered_markets": len(quoted_or_entered_market_keys),
+            "structural_event_count": len(structural_events),
+            "governance_event_count": len(governance_events),
+            "quoted_or_entered_event_count": len(quoted_or_entered_events),
+            "quote_skip_event_count": len(quote_skip_events),
+            "top_structural_reasons": [[reason, count] for reason, count in structural_reason_counts.most_common(top_n)],
+            "top_governance_reasons": [[reason, count] for reason, count in governance_reason_counts.most_common(top_n)],
+            "top_quote_skip_reasons": [[reason, count] for reason, count in quote_skip_reason_counts.most_common(top_n)],
+            "event_window_count": len(event_rows),
+            "summary_scope": _BOUNDED_RECENT_RUN_SCOPE,
+            "reason_counts_scope": "recent_run_events",
+            "inferred_discovered_markets": inferred_discovered,
+        }
+
+    def summarize_market_eligibility(
+        self,
+        *,
+        event_limit: int = 2000,
+        sample_limit: int = 2000,
+        run_id: str | None = None,
+        discovered_markets: int | None = None,
+        top_n: int = 3,
+    ) -> Dict[str, Any]:
+        resolved_run_id = run_id or self.current_run_id()
+        events = self.read_events(limit=event_limit, run_id=resolved_run_id)
+        market_samples = self.read_market_samples(limit=sample_limit, run_id=resolved_run_id)
+        return self.summarize_market_eligibility_events(
+            events,
+            market_samples=market_samples,
+            discovered_market_keys=self._market_keys_from_samples(market_samples),
+            discovered_markets=discovered_markets,
+            top_n=top_n,
+        )
 
     @staticmethod
     def _snapshot_label(snapshot_ts: float) -> str:
@@ -188,9 +456,29 @@ class RuntimeTelemetry:
     @staticmethod
     def _render_latest_status_text(status: Dict) -> str:
         risk = status.get("risk", {}) or {}
+        eligibility = status.get("market_eligibility") or {}
+        summary_scope = str(eligibility.get("summary_scope") or "run")
+        reason_scope = str(eligibility.get("reason_counts_scope") or "")
+        eligibility_scope = (
+            "bounded recent-run"
+            if summary_scope in {"run", _BOUNDED_RECENT_RUN_SCOPE} and reason_scope == "recent_run_events"
+            else summary_scope
+        )
+        pause_policy = status.get("pause_policy") or "n/a"
+        pause_scope = status.get("pause_scope") or "n/a"
+        pause_reason = status.get("pause_reason") or "n/a"
+        if status.get("market_eligibility_stale"):
+            market_eligibility_line = "market_eligibility[stale]=pending_refresh"
+        else:
+            market_eligibility_line = (
+                f"market_eligibility[{eligibility_scope}]=discovered:{int(eligibility.get('discovered_markets', 0) or 0)} structural:{int(eligibility.get('structurally_untradeable_markets', 0) or 0)} governance:{int(eligibility.get('governance_blocked_markets', 0) or 0)} quoted_entered:{int(eligibility.get('quoted_or_entered_markets', 0) or 0)}"
+            )
         return (
             f"run_id={status.get('run_id', 'unknown')}\n"
             f"phase={status.get('phase', 'unknown')} mode={status.get('mode', 'unknown')} loop_count={status.get('loop_count', 0)}\n"
+            f"{market_eligibility_line}\n"
+            f"runtime_gate={status.get('gate_state', 'unknown')} new_order_pause={bool(status.get('new_order_pause', False))}\n"
+            f"pause_policy={pause_policy} pause_scope={pause_scope} pause_reason={pause_reason}\n"
             f"bankroll={float(risk.get('capital', status.get('bankroll', 0.0))):.2f}\n"
             f"open_position_count={status.get('open_position_count', 0)} resolved_trade_count={status.get('resolved_trade_count', 0)}\n"
             f"heartbeat_ts={status.get('heartbeat_ts', 0)}\n"

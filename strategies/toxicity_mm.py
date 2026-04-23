@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 from book_quality import BookQuality
+from market_context import MarketContext
 from market_data import OrderBook, PolymarketData
 from tradeability_policy import assess_tradeability, tradeability_policy
 
@@ -64,6 +65,7 @@ class ToxicityMM:
         orderbook: OrderBook,
         *,
         preferred_outcome: str | None = None,
+        context: MarketContext | None = None,
     ) -> Tuple[Optional[MMQuote], Optional[MMQuote], BookQuality]:
         # Pick outcome: use preferred_outcome if provided and valid, else default to outcome_labels[0]
         if preferred_outcome is not None and preferred_outcome in orderbook.outcome_labels:
@@ -71,6 +73,10 @@ class ToxicityMM:
         else:
             primary_outcome = orderbook.outcome_labels[0]
         quality = self.assess_book(orderbook, primary_outcome)
+        inventory = self._inventory_for(market_id, primary_outcome)
+        if context is not None and context.seconds_to_expiry < 30.0:
+            return self._endgame_quote(market_id, primary_outcome, orderbook, quality, inventory)
+
         if not quality.is_tradeable:
             return None, None, quality
 
@@ -87,8 +93,23 @@ class ToxicityMM:
             return None, None, quality
 
         spread = self.get_optimal_spread(0.02, vpin, quality)
+        reason_parts = [f"VPIN={vpin:.2f}", f"book_spread_bps={quality.spread_bps:.1f}"]
+        if context is not None:
+            tte_spread_mult = self._tte_spread_multiplier(context.seconds_to_expiry)
+            spread *= tte_spread_mult
+            reason_parts.append(f"tte={context.seconds_to_expiry:.1f}s")
+            reason_parts.append(f"tte_spread_mult={tte_spread_mult:.1f}")
         bid_price = mid_yes * (1 - spread / 2)
         ask_price = mid_yes * (1 + spread / 2)
+
+        if context is not None and inventory != 0:
+            bid_price = self.inventory_adjust_price(bid_price, inventory, self.max_position)
+            ask_price = self.inventory_adjust_price(ask_price, -inventory, self.max_position)
+            reason_parts.append(f"inventory_skew={inventory:.2f}")
+
+        if context is not None:
+            bid_price = self._clamp_price(bid_price)
+            ask_price = self._clamp_price(ask_price)
         spread_price_units = ask_price - bid_price
         if spread_price_units <= 0:
             quality.reasons.append("non_positive_quote_spread")
@@ -98,16 +119,107 @@ class ToxicityMM:
         size = (self.kelly_fraction * 1000) / spread_price_units
         size = min(size, self.max_position, self.paper_max_notional_usd / max(mid_yes, 1e-9))
         size = max(size, 1.0)
+        bid_size = size
+        ask_size = size
+        if context is not None:
+            tte_size_mult = max(0.0, 0.4 + 0.6 * float(context.tte_pct))
+            bid_size = max(bid_size * tte_size_mult, 0.01)
+            ask_size = max(ask_size * tte_size_mult, 0.01)
+            reason_parts.append(f"tte_size_mult={tte_size_mult:.2f}")
+            if context.imbalance_yes > 0.6:
+                bid_size *= 0.75
+                ask_size *= 1.25
+                reason_parts.append("imbalance_fade=ask_heavier")
+            elif context.imbalance_yes < -0.6:
+                bid_size *= 1.25
+                ask_size *= 0.75
+                reason_parts.append("imbalance_fade=bid_heavier")
+        reason_parts.append(f"quote_spread={spread:.3%}")
         quote = MMQuote(
             market_id=market_id,
             outcome=primary_outcome,
             bid_price=round(bid_price, 4),
             ask_price=round(ask_price, 4),
-            bid_size=round(size, 2),
-            ask_size=round(size, 2),
-            reason=f"VPIN={vpin:.2f}|book_spread_bps={quality.spread_bps:.1f}|quote_spread={spread:.3%}",
+            bid_size=round(bid_size, 2),
+            ask_size=round(ask_size, 2),
+            reason="|".join(reason_parts),
             book_quality=quality.to_dict(),
         )
+        return quote, None, quality
+
+    def _inventory_for(self, market_id: str, outcome: str) -> float:
+        try:
+            pos = self.positions.get(market_id, {}).get(outcome, {})
+            return float(pos.get("size", 0.0) or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            return 0.0
+
+    def _tte_spread_multiplier(self, seconds_to_expiry: float) -> float:
+        tte = float(seconds_to_expiry)
+        if tte > 180.0:
+            return 1.0
+        if tte >= 60.0:
+            return 1.3
+        if tte >= 30.0:
+            return 1.8
+        return 3.0
+
+    def _clamp_price(self, price: float) -> float:
+        return max(0.01, min(float(price), 0.99))
+
+    def _endgame_quote(
+        self,
+        market_id: str,
+        outcome: str,
+        orderbook: OrderBook,
+        quality: BookQuality,
+        inventory: float,
+    ) -> Tuple[Optional[MMQuote], Optional[MMQuote], BookQuality]:
+        tick = 0.01
+        if inventory == 0:
+            quality.reasons.append("endgame_no_new_orders")
+            return None, None, quality
+
+        best_bid = PolymarketData.best_bid(orderbook, outcome)
+        best_ask = PolymarketData.best_ask(orderbook, outcome)
+
+        flatten_size = round(abs(inventory), 2)
+        if inventory > 0:
+            if best_bid <= 0:
+                quality.reasons.append("endgame_missing_touch")
+                quality.is_tradeable = False
+                return None, None, quality
+            # Long inventory must flatten by selling with a marketable price.  A sell
+            # limit at or below the best bid crosses the book instead of resting.
+            aggressive_ask = self._clamp_price(best_bid - tick)
+            quote = MMQuote(
+                market_id=market_id,
+                outcome=outcome,
+                bid_price=0.0,
+                ask_price=round(aggressive_ask, 4),
+                bid_size=0.0,
+                ask_size=flatten_size,
+                reason=f"endgame_flatten|inventory={inventory:.2f}|side=sell",
+                book_quality=quality.to_dict(),
+            )
+        else:
+            if best_ask <= 0:
+                quality.reasons.append("endgame_missing_touch")
+                quality.is_tradeable = False
+                return None, None, quality
+            # Short inventory must flatten by buying with a marketable price.  A buy
+            # limit at or above the best ask crosses the book instead of resting.
+            aggressive_bid = self._clamp_price(best_ask + tick)
+            quote = MMQuote(
+                market_id=market_id,
+                outcome=outcome,
+                bid_price=round(aggressive_bid, 4),
+                ask_price=0.0,
+                bid_size=flatten_size,
+                ask_size=0.0,
+                reason=f"endgame_flatten|inventory={inventory:.2f}|side=buy",
+                book_quality=quality.to_dict(),
+            )
         return quote, None, quality
 
     def update_position(self, market_id: str, outcome: str, executed_price: float, size: float, is_buy: bool):

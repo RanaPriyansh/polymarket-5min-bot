@@ -126,12 +126,128 @@ def _active_slot_summary(markets: List[Dict]) -> List[Dict]:
 
 
 def _strategy_governance(cfg: dict, active_strategies: List[str]) -> Dict[str, object]:
-    candidates = [str(item).strip() for item in cfg.get("strategies", {}).get("candidates", []) if str(item).strip()]
-    baseline = active_strategies[0] if len(active_strategies) == 1 else None
+    active_set = {str(item).strip() for item in active_strategies if str(item).strip()}
+    candidates = [
+        str(item).strip()
+        for item in cfg.get("strategies", {}).get("candidates", [])
+        if str(item).strip() and str(item).strip() not in active_set
+    ]
+    if "toxicity_mm" in active_set:
+        baseline = "toxicity_mm"
+    else:
+        baseline = active_strategies[0] if len(active_strategies) == 1 else None
     return {
         "baseline_strategy": baseline,
+        "active_strategy_families": list(active_strategies),
         "research_candidates": candidates,
     }
+
+
+def _write_runtime_snapshot(
+    runtime: RuntimeTelemetry,
+    *,
+    cfg: dict,
+    run_id: str,
+    phase: str,
+    mode: str,
+    loop_count: int,
+    fetched_markets: int,
+    processed_markets: int,
+    toxic_skips: int,
+    bankroll: float,
+    all_markets: List[Dict],
+    executor_snapshot: Dict,
+    positions,
+    risk_report: Dict,
+    gate_snapshot: Dict[str, object],
+    strategy_governance: Dict[str, object],
+) -> Dict:
+    active_families = [
+        str(item).strip()
+        for item in (strategy_governance.get("active_strategy_families") or [])
+        if str(item).strip()
+    ]
+    if not active_families:
+        baseline_strategy = str(strategy_governance.get("baseline_strategy") or "").strip()
+        if baseline_strategy:
+            active_families = [baseline_strategy]
+    gate_pause = _aggregate_gate_pause_decision(
+        str(gate_snapshot["gate_state"]),
+        list(gate_snapshot["gate_reasons"]),
+        active_families=active_families,
+        settlement_truth_blocking=_settlement_truth_pause_enabled(cfg),
+    )
+    market_eligibility = runtime.summarize_market_eligibility(run_id=run_id)
+    return runtime.write_runtime_snapshot(
+        run_id=run_id,
+        phase=phase,
+        mode=mode,
+        loop_count=loop_count,
+        fetched_markets=fetched_markets,
+        processed_markets=processed_markets,
+        toxic_skips=toxic_skips,
+        bankroll=round(bankroll, 6),
+        open_position_count=executor_snapshot["open_position_count"],
+        resolved_trade_count=executor_snapshot["resolved_trade_count"],
+        win_rate=round(executor_snapshot["win_rate"], 6),
+        active_slots=_active_slot_summary(all_markets),
+        pending_resolution_slots=executor_snapshot["pending_resolution_slots"],
+        latest_slot_resolution=executor_snapshot.get("latest_slot_resolution"),
+        latest_position_settlement=executor_snapshot.get("latest_position_settlement"),
+        latest_settlement=executor_snapshot.get("latest_settlement"),
+        positions=positions,
+        risk=risk_report,
+        gate_state=gate_snapshot["gate_state"],
+        gate_reasons=gate_snapshot["gate_reasons"],
+        gate_inputs=gate_snapshot["gate_inputs"],
+        new_order_pause=bool(gate_pause["pause"]),
+        pause_policy=str(gate_pause["policy"]),
+        pause_reason=str(gate_pause["reason"]),
+        pause_scope=str(gate_pause["scope"]),
+        pause_blocking_reasons=list(gate_pause["blocking_gate_reasons"]),
+        pause_family_decisions=dict(gate_pause["family_pause_decisions"]),
+        market_eligibility=market_eligibility,
+        **strategy_governance,
+    )
+
+
+def _write_runtime_status_snapshot(
+    runtime: RuntimeTelemetry,
+    *,
+    cfg: dict | None = None,
+    run_id: str,
+    phase: str,
+    mode: str,
+    loop_count: int,
+    fetched_markets: int,
+    processed_markets: int,
+    toxic_skips: int,
+    bankroll: float,
+    all_markets: List[Dict],
+    executor_snapshot: Dict,
+    positions,
+    risk_report: Dict,
+    gate_snapshot: Dict[str, object],
+    strategy_governance: Dict[str, object],
+) -> Dict:
+    return _write_runtime_snapshot(
+        runtime,
+        cfg=cfg or {},
+        run_id=run_id,
+        phase=phase,
+        mode=mode,
+        loop_count=loop_count,
+        fetched_markets=fetched_markets,
+        processed_markets=processed_markets,
+        toxic_skips=toxic_skips,
+        bankroll=bankroll,
+        all_markets=all_markets,
+        executor_snapshot=executor_snapshot,
+        positions=positions,
+        risk_report=risk_report,
+        gate_snapshot=gate_snapshot,
+        strategy_governance=strategy_governance,
+    )
 
 
 def _runtime_gate_snapshot(runtime_dir: str | Path) -> Dict[str, object]:
@@ -144,18 +260,164 @@ def _runtime_gate_snapshot(runtime_dir: str | Path) -> Dict[str, object]:
     }
 
 
-def _should_pause_new_orders(gate_state: str, gate_reasons: List[str]) -> bool:
-    if gate_state != "RED":
-        return False
-    normalized = [str(reason).lower() for reason in gate_reasons]
-    return any(
-        (
-            "win_rate=" in reason
-            or "circuit_breaker" in reason
-            or "contradiction_log_open" in reason
+_MM_EXEMPT_FAMILIES = {"toxicity_mm", "market_making"}
+_HARD_STOP_REASON_MARKERS = (
+    "circuit_breaker",
+    "contradiction_log_open",
+    "run_lineage_fragmentation",
+)
+_LOW_WIN_RATE_REASON_MARKERS = ("win_rate=",)
+_SETTLEMENT_TRUTH_REASON_MARKERS = ("settlement_pnl_computable=",)
+_NON_BLOCKING_RED_REASON_MARKERS = _SETTLEMENT_TRUTH_REASON_MARKERS
+
+
+def _is_market_making_family(strategy_family: str) -> bool:
+    normalized = str(strategy_family or "").strip().lower()
+    return normalized in _MM_EXEMPT_FAMILIES
+
+
+def _matching_gate_reasons(gate_reasons: List[str], markers: tuple[str, ...]) -> List[str]:
+    matched: List[str] = []
+    for reason in gate_reasons:
+        normalized_reason = str(reason).lower()
+        if any(marker in normalized_reason for marker in markers):
+            matched.append(reason)
+    return matched
+
+
+def _settlement_truth_pause_enabled(cfg: dict | None) -> bool:
+    config = cfg or {}
+    execution_cfg = config.get("execution", {}) or {}
+    runtime_gate_cfg = config.get("runtime_gate", {}) or {}
+    return bool(
+        runtime_gate_cfg.get(
+            "block_on_uncomputable_settlement_truth",
+            execution_cfg.get("block_on_uncomputable_settlement_truth", False),
         )
-        for reason in normalized
     )
+
+
+def _aggregate_gate_pause_decision(
+    gate_state: str,
+    gate_reasons: List[str],
+    *,
+    active_families: List[str],
+    settlement_truth_blocking: bool = False,
+) -> Dict[str, object]:
+    families = [str(item).strip() for item in active_families if str(item).strip()]
+    if not families:
+        families = [""]
+    decisions = {
+        family or "unknown": _gate_pause_decision(
+            gate_state,
+            gate_reasons,
+            strategy_family=family,
+            settlement_truth_blocking=settlement_truth_blocking,
+        )
+        for family in families
+    }
+    paused_families = [family for family, decision in decisions.items() if bool(decision["pause"])]
+    unpaused_families = [family for family, decision in decisions.items() if not bool(decision["pause"])]
+    decision_reasons = {str(decision["reason"]) for decision in decisions.values()}
+    if paused_families and unpaused_families:
+        aggregate_reason = "mixed_by_family"
+        aggregate_pause = False
+        aggregate_scope = "mixed_by_family"
+    elif paused_families:
+        aggregate_reason = next(iter(decision_reasons)) if len(decision_reasons) == 1 else "all_paused_mixed_reasons"
+        aggregate_pause = True
+        aggregate_scope = "all_active_families"
+    else:
+        aggregate_reason = next(iter(decision_reasons)) if len(decision_reasons) == 1 else "all_unpaused_mixed_reasons"
+        aggregate_pause = False
+        aggregate_scope = "no_active_families_paused"
+    return {
+        "pause": aggregate_pause,
+        "policy": "family-aware",
+        "reason": aggregate_reason,
+        "scope": aggregate_scope,
+        "blocking_gate_reasons": sorted(
+            {reason for decision in decisions.values() for reason in decision["blocking_gate_reasons"]}
+        ),
+        "family_pause_decisions": decisions,
+        "active_families": [family for family in decisions.keys() if family != "unknown"],
+    }
+
+
+def _gate_pause_decision(
+    gate_state: str,
+    gate_reasons: List[str],
+    *,
+    strategy_family: str,
+    settlement_truth_blocking: bool = False,
+) -> Dict[str, object]:
+    normalized_family = str(strategy_family or "").strip().lower()
+    if gate_state != "RED":
+        return {
+            "pause": False,
+            "policy": "family-aware",
+            "reason": "gate_not_red",
+            "blocking_gate_reasons": [],
+        }
+
+    hard_stop_reasons = _matching_gate_reasons(gate_reasons, _HARD_STOP_REASON_MARKERS)
+    if hard_stop_reasons:
+        return {
+            "pause": True,
+            "policy": "family-aware",
+            "reason": "hard_stop_red_gate",
+            "blocking_gate_reasons": hard_stop_reasons,
+        }
+
+    settlement_truth_reasons = _matching_gate_reasons(gate_reasons, _SETTLEMENT_TRUTH_REASON_MARKERS)
+    if settlement_truth_blocking and settlement_truth_reasons:
+        return {
+            "pause": True,
+            "policy": "family-aware",
+            "reason": "settlement_truth_blocking_red_gate",
+            "blocking_gate_reasons": settlement_truth_reasons,
+        }
+
+    low_win_rate_reasons = _matching_gate_reasons(gate_reasons, _LOW_WIN_RATE_REASON_MARKERS)
+    if low_win_rate_reasons:
+        non_low_win_rate_reasons = [reason for reason in gate_reasons if reason not in low_win_rate_reasons]
+        if _is_market_making_family(normalized_family):
+            non_blocking_reasons = _matching_gate_reasons(non_low_win_rate_reasons, _NON_BLOCKING_RED_REASON_MARKERS)
+            if len(non_blocking_reasons) == len(non_low_win_rate_reasons):
+                return {
+                    "pause": False,
+                    "policy": "family-aware",
+                    "reason": (
+                        "mm_exempt_low_win_rate_only"
+                        if not non_low_win_rate_reasons
+                        else "mm_exempt_low_win_rate_non_blocking_red_gate"
+                    ),
+                    "blocking_gate_reasons": [],
+                }
+            return {
+                "pause": True,
+                "policy": "family-aware",
+                "reason": "mm_low_win_rate_mixed_blocking_red_gate",
+                "blocking_gate_reasons": low_win_rate_reasons + non_low_win_rate_reasons,
+            }
+        return {
+            "pause": True,
+            "policy": "family-aware",
+            "reason": "directional_low_win_rate_red_gate",
+            "blocking_gate_reasons": low_win_rate_reasons,
+        }
+
+    return {
+        "pause": False,
+        "policy": "family-aware",
+        "reason": "non_blocking_red_gate",
+        "blocking_gate_reasons": [],
+    }
+
+
+def _should_pause_new_orders(gate_state: str, gate_reasons: List[str], *, strategy_family: str) -> bool:
+    decision = _gate_pause_decision(gate_state, gate_reasons, strategy_family=strategy_family)
+    return bool(decision["pause"])
 
 
 def _strategy_directional_signal_entry_style(cfg: dict, strategy_family: str, signal=None) -> str:
@@ -187,6 +449,72 @@ def _strategy_min_seconds_to_expiry(cfg: dict, strategy_family: str) -> float:
     return float(execution_cfg.get("min_seconds_to_expiry_for_new_orders", 120))
 
 
+def _quote_submission_post_only(reason: str | None) -> bool:
+    """Flattening is a risk-reduction intent; do not let it rest as a maker quote."""
+    return "endgame_flatten" not in str(reason or "")
+
+
+def _toxicity_mm_runtime_entry_allowed(
+    *,
+    entry_allowed: bool,
+    entry_reasons: List[str],
+    seconds_to_expiry: float,
+    has_existing_exposure: bool,
+) -> bool:
+    if entry_allowed:
+        return True
+    tte_only_block = bool(entry_reasons) and all(str(reason).startswith("tte_lt_") for reason in entry_reasons)
+    if not tte_only_block:
+        return False
+    if has_existing_exposure:
+        return True
+    return float(seconds_to_expiry) < 30.0
+
+
+def _toxicity_mm_has_family_market_state(executor, market_id: str) -> bool:
+    """Return true when toxicity_mm has exposure or cancellable family orders in a market."""
+    if executor.has_strategy_market_exposure("toxicity_mm", market_id):
+        return True
+    open_statuses = {"open", "partially_filled", "acknowledged"}
+    return any(
+        order.get("market_id") == market_id
+        and order.get("strategy_family") == "toxicity_mm"
+        and order.get("status") in open_statuses
+        for order in getattr(executor, "orders", {}).values()
+    )
+
+
+def _risk_reduce_toxicity_quote(quote, *, inventory: float):
+    if quote is None:
+        return None
+    inventory = float(inventory or 0.0)
+    if inventory == 0 or "endgame_flatten" in str(getattr(quote, "reason", "")):
+        return quote
+    bid_size = float(getattr(quote, "bid_size", 0.0) or 0.0)
+    ask_size = float(getattr(quote, "ask_size", 0.0) or 0.0)
+    if inventory > 0:
+        bid_size = 0.0
+        ask_size = min(ask_size, abs(inventory))
+    else:
+        bid_size = min(bid_size, abs(inventory))
+        ask_size = 0.0
+    if bid_size <= 0 and ask_size <= 0:
+        return None
+    reason = str(getattr(quote, "reason", ""))
+    if "risk_reduce_only" not in reason:
+        reason = f"{reason}|risk_reduce_only" if reason else "risk_reduce_only"
+    return quote.__class__(
+        market_id=quote.market_id,
+        outcome=quote.outcome,
+        bid_price=quote.bid_price,
+        ask_price=quote.ask_price,
+        bid_size=round(bid_size, 2),
+        ask_size=round(ask_size, 2),
+        reason=reason,
+        book_quality=quote.book_quality,
+    )
+
+
 def _entry_gate_for_market(
     cfg: dict,
     market: Dict,
@@ -197,9 +525,15 @@ def _entry_gate_for_market(
     gate_reasons: List[str],
 ) -> tuple[bool, List[str]]:
     reasons: List[str] = []
-    if _should_pause_new_orders(gate_state, gate_reasons):
+    gate_pause = _gate_pause_decision(
+        gate_state,
+        gate_reasons,
+        strategy_family=strategy_family,
+        settlement_truth_blocking=_settlement_truth_pause_enabled(cfg),
+    )
+    if bool(gate_pause["pause"]):
         reasons.append("runtime_gate_red")
-        reasons.extend([f"gate:{reason}" for reason in gate_reasons])
+        reasons.extend([f"gate:{reason}" for reason in gate_pause["blocking_gate_reasons"] or gate_reasons])
         return False, reasons
 
     min_seconds = _strategy_min_seconds_to_expiry(cfg, strategy_family)
@@ -353,10 +687,13 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     """Run the trading bot in specified mode."""
     from execution import PolymarketExecutor
     from tradeability_policy import assess_tradeability
+    from market_context import build_market_context
     from market_data import PolymarketData
     from risk import RiskManager
+    from spot_provider import SpotProvider
     from strategies.mean_reversion_5min import MeanReversion5Min
     from strategies.opening_range import OpeningRangeBreakout
+    from strategies.spot_momentum import SpotMomentum
     from strategies.time_decay import TimeDecay
     from strategies.toxicity_mm import ToxicityMM
 
@@ -419,7 +756,12 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
             mean_rev = MeanReversion5Min(cfg)
             opening_range = OpeningRangeBreakout(cfg)
             time_decay = TimeDecay(cfg)
+            spot_momentum = SpotMomentum(cfg)
             mm = ToxicityMM(cfg)
+            spot_provider = SpotProvider()
+            spot_provider.start()
+            mid_history_store = {}
+            slot_spot_anchor_store = {}
             risk_mgr = RiskManager(cfg, initial_capital=initial_capital)
             executor = PolymarketExecutor(cfg, md, mode=mode, run_id=run_id)
             await executor.__aenter__()
@@ -465,6 +807,14 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
 
                         orderbook = ob_or_exc
                         orderbooks_by_market[market_id] = orderbook
+                        market_context = build_market_context(
+                            market,
+                            orderbook,
+                            loop_now,
+                            spot_provider.get,
+                            mid_history_store,
+                            slot_spot_anchor_store,
+                        )
                         book_quality = assess_tradeability(
                             cfg,
                             "runtime_baseline",
@@ -593,15 +943,68 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     )
                                     result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="time_decay")
                                     _emit_events(runtime, result.get("events", []), run_id=run_id)
+                                    if result.get("opened"):
+                                        time_decay.mark_signal_fired(market_id, market, orderbook, signal.outcome)
 
-                        if "toxicity_mm" in active_strategies and _strategy_entry_allowed(
+                        if "spot_momentum" in active_strategies and _strategy_entry_allowed(
                             runtime,
                             cfg,
                             market,
                             now_ts=loop_now,
-                            strategy_family="toxicity_mm",
+                            strategy_family="spot_momentum",
                             gate_snapshot=gate_snapshot,
                         ):
+                            signal = spot_momentum.generate_signal(market_context)
+                            if signal:
+                                signal.size = _bounded_directional_signal_size(
+                                    risk_mgr,
+                                    "spot_momentum",
+                                    signal,
+                                    reference_price=max(signal.price, 0.01),
+                                )
+                                if signal.size > 0 and not executor.has_strategy_market_exposure("spot_momentum", market_id):
+                                    click.echo(
+                                        f"SPOT MOMENTUM: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
+                                    )
+                                    result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="spot_momentum")
+                                    _emit_events(runtime, result.get("events", []), run_id=run_id)
+                                    if result.get("opened"):
+                                        spot_momentum.mark_signal_fired(market_context)
+
+                        toxicity_mm_entry_allowed = False
+                        toxicity_mm_has_exposure = False
+                        toxicity_mm_has_market_state = False
+                        if "toxicity_mm" in active_strategies:
+                            toxicity_mm_has_exposure = executor.has_strategy_market_exposure("toxicity_mm", market_id)
+                            toxicity_mm_has_market_state = _toxicity_mm_has_family_market_state(executor, market_id)
+                            mm_entry_allowed, mm_entry_reasons = _entry_gate_for_market(
+                                cfg,
+                                market,
+                                now_ts=loop_now,
+                                strategy_family="toxicity_mm",
+                                gate_state=str(gate_snapshot["gate_state"]),
+                                gate_reasons=list(gate_snapshot["gate_reasons"]),
+                            )
+                            if _toxicity_mm_runtime_entry_allowed(
+                                entry_allowed=mm_entry_allowed,
+                                entry_reasons=mm_entry_reasons,
+                                seconds_to_expiry=market_context.seconds_to_expiry,
+                                has_existing_exposure=toxicity_mm_has_exposure,
+                            ):
+                                toxicity_mm_entry_allowed = True
+                            else:
+                                cancelled_count = 0
+                                if toxicity_mm_has_market_state:
+                                    cancelled_count = await executor.cancel_family_market(market_id, "toxicity_mm")
+                                runtime.append_event("market.entry_blocked", {
+                                    "market_id": market["id"],
+                                    "market_slug": market["slug"],
+                                    "strategy_family": "toxicity_mm",
+                                    "reasons": mm_entry_reasons,
+                                    "cancelled_orders": cancelled_count,
+                                })
+
+                        if toxicity_mm_entry_allowed:
                             # Choose quote outcome: prefer whichever side has less executor exposure.
                             # If no position exists, alternate between Up/Down per loop to avoid pure directionality.
                             primary_outcome = market["outcomes"][0]  # "Up"
@@ -609,53 +1012,79 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
 
                             qty_up = executor.get_position_quantity("toxicity_mm", market_id, primary_outcome)
                             qty_dn = executor.get_position_quantity("toxicity_mm", market_id, secondary_outcome)
+                            mm.positions[market_id] = {
+                                primary_outcome: {"size": qty_up, "avg": 0.0},
+                                secondary_outcome: {"size": qty_dn, "avg": 0.0},
+                            }
 
-                            # Quote the side with less absolute inventory; tie-break by loop parity
-                            if abs(qty_up) < abs(qty_dn):
+                            # With existing exposure, quote the inventory-carrying side so
+                            # replacements can reduce risk.  When flat, quote the side with
+                            # less absolute inventory and tie-break by loop parity.
+                            if toxicity_mm_has_exposure:
+                                if abs(qty_up) > abs(qty_dn):
+                                    preferred_outcome = primary_outcome
+                                elif abs(qty_dn) > abs(qty_up):
+                                    preferred_outcome = secondary_outcome
+                                else:
+                                    preferred_outcome = primary_outcome if loop_count % 2 == 0 else secondary_outcome
+                            elif abs(qty_up) < abs(qty_dn):
                                 preferred_outcome = primary_outcome
                             elif abs(qty_dn) < abs(qty_up):
                                 preferred_outcome = secondary_outcome
                             else:
                                 preferred_outcome = primary_outcome if loop_count % 2 == 0 else secondary_outcome
 
-                            quote_yes, _, quality = mm.generate_quotes(market_id, orderbook, preferred_outcome=preferred_outcome)
+                            quote_yes, _, quality = mm.generate_quotes(
+                                market_id,
+                                orderbook,
+                                preferred_outcome=preferred_outcome,
+                                context=market_context,
+                            )
+                            preferred_inventory = qty_up if preferred_outcome == primary_outcome else qty_dn
+                            is_flatten_quote = bool(quote_yes and "endgame_flatten" in quote_yes.reason)
+                            if quote_yes and toxicity_mm_has_exposure and not is_flatten_quote:
+                                quote_yes = _risk_reduce_toxicity_quote(quote_yes, inventory=preferred_inventory)
                             if not quote_yes:
                                 executor.note_toxic_book_skip("toxicity_mm")
+                                cancelled_count = 0
+                                if toxicity_mm_has_market_state:
+                                    cancelled_count = await executor.cancel_family_market(market_id, "toxicity_mm")
                                 runtime.append_event("quote.skipped", {
                                     "market_id": market_id,
                                     "market_slug": market["slug"],
                                     "strategy_family": "toxicity_mm",
                                     "reasons": list(quality.reasons),
-                                })
-                            elif executor.has_strategy_market_exposure("toxicity_mm", market_id):
-                                runtime.append_event("quote.skipped", {
-                                    "market_id": market_id,
-                                    "market_slug": market["slug"],
-                                    "strategy_family": "toxicity_mm",
-                                    "reasons": ["existing_market_exposure"],
+                                    "cancelled_orders": cancelled_count,
                                 })
                             else:
                                 await executor.cancel_family_market(market_id, "toxicity_mm")
-                                bid_id = await executor.place_order(
-                                    market_id,
-                                    quote_yes.outcome,
-                                    "BUY",
-                                    quote_yes.bid_size,
-                                    quote_yes.bid_price,
-                                    strategy_family="toxicity_mm",
-                                    order_kind="quote",
-                                    market=market,
-                                )
-                                ask_id = await executor.place_order(
-                                    market_id,
-                                    quote_yes.outcome,
-                                    "SELL",
-                                    quote_yes.ask_size,
-                                    quote_yes.ask_price,
-                                    strategy_family="toxicity_mm",
-                                    order_kind="quote",
-                                    market=market,
-                                )
+                                bid_id = None
+                                ask_id = None
+                                quote_post_only = _quote_submission_post_only(quote_yes.reason)
+                                if quote_yes.bid_size > 0:
+                                    bid_id = await executor.place_order(
+                                        market_id,
+                                        quote_yes.outcome,
+                                        "BUY",
+                                        quote_yes.bid_size,
+                                        quote_yes.bid_price,
+                                        post_only=quote_post_only,
+                                        strategy_family="toxicity_mm",
+                                        order_kind="quote",
+                                        market=market,
+                                    )
+                                if quote_yes.ask_size > 0:
+                                    ask_id = await executor.place_order(
+                                        market_id,
+                                        quote_yes.outcome,
+                                        "SELL",
+                                        quote_yes.ask_size,
+                                        quote_yes.ask_price,
+                                        post_only=quote_post_only,
+                                        strategy_family="toxicity_mm",
+                                        order_kind="quote",
+                                        market=market,
+                                    )
                                 runtime.append_event("quote.submitted", {
                                     "market_id": market_id,
                                     "market_slug": market["slug"],
@@ -682,7 +1111,9 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         now_ts=snapshot_ts,
                     )
                     executor.record_risk_snapshot(risk_report, snapshot_ts=snapshot_ts)
-                    runtime.write_runtime_snapshot(
+                    _write_runtime_snapshot(
+                        runtime,
+                        cfg=cfg,
                         run_id=run_id,
                         phase="running",
                         mode=mode,
@@ -690,23 +1121,13 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         fetched_markets=len(all_markets),
                         processed_markets=processed_markets,
                         toxic_skips=toxic_skips,
-                        bankroll=round(risk_report["capital"], 6),
-                        open_position_count=executor_snapshot["open_position_count"],
-                        resolved_trade_count=executor_snapshot["resolved_trade_count"],
-                        win_rate=round(executor_snapshot["win_rate"], 6),
-                        active_slots=_active_slot_summary(all_markets),
-                        pending_resolution_slots=executor_snapshot["pending_resolution_slots"],
-                        latest_settlement=executor_snapshot["latest_settlement"],
+                        bankroll=risk_report["capital"],
+                        all_markets=all_markets,
+                        executor_snapshot=executor_snapshot,
                         positions=positions,
-                        risk=risk_report,
-                        gate_state=gate_snapshot["gate_state"],
-                        gate_reasons=gate_snapshot["gate_reasons"],
-                        gate_inputs=gate_snapshot["gate_inputs"],
-                        new_order_pause=_should_pause_new_orders(
-                            str(gate_snapshot["gate_state"]),
-                            list(gate_snapshot["gate_reasons"]),
-                        ),
-                        **strategy_governance,
+                        risk_report=risk_report,
+                        gate_snapshot=gate_snapshot,
+                        strategy_governance=strategy_governance,
                     )
                     click.echo(
                         "Paper bankroll ${capital:.2f} | open={open} | resolved={resolved} | pending={pending}".format(
@@ -753,6 +1174,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                 runtime.append_event("runtime.interrupted", {"run_id": run_id, "signal": stop_reason})
             finally:
                 _remove_signal_shutdown(loop, registered_signals)
+                spot_provider.stop()
                 runtime.update_status(run_id=run_id, phase="stopped", mode=mode, loop_count=loop_count, stop_reason=stop_reason)
                 runtime.append_event(
                     "runtime.stopped",

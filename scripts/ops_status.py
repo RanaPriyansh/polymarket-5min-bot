@@ -22,6 +22,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from scripts.operator_truth import artifact_truth_lines
+from runtime_telemetry import RuntimeTelemetry
+from status_utils import format_reason_counts, market_eligibility_scope_label, pause_surface_lines
 
 
 def load_json(path: Path, default=None):
@@ -54,9 +56,11 @@ def fmt_duration(seconds: float) -> str:
 
 
 def render_status(runtime_dir: Path, now_ts: float | None = None) -> str:
+    runtime_dir = Path(runtime_dir)
     now_ts = now_ts or time.time()
     status_json = load_json(runtime_dir / "status.json")
     strategy_json = load_json(runtime_dir / "strategy_metrics.json")
+    telemetry = RuntimeTelemetry(runtime_dir)
     metrics_path = runtime_dir.parent.parent / "data" / "runtime" / "strategy_metrics.json"
     if not strategy_json and metrics_path.exists():
         strategy_json = load_json(metrics_path)
@@ -78,7 +82,9 @@ def render_status(runtime_dir: Path, now_ts: float | None = None) -> str:
     strategies = status_json.get("strategies", [])
     fetched = status_json.get("fetched_markets", 0)
     toxic_skips = status_json.get("toxic_skips", 0)
-    latest_settlement = status_json.get("latest_settlement")
+    latest_slot_resolution = status_json.get("latest_slot_resolution") or status_json.get("latest_resolution")
+    latest_position_settlement = status_json.get("latest_position_settlement")
+    latest_settlement = status_json.get("latest_settlement") or latest_position_settlement
 
     heartbeat_ago = now_ts - heartbeat if heartbeat > 0 else None
     run_age = 0  # best guess from status.json timestamps
@@ -86,6 +92,14 @@ def render_status(runtime_dir: Path, now_ts: float | None = None) -> str:
     # More reliable: check for the oldest event with this run_id
     run_age_hint = f"~{loop_count * 5}s (from loop count * 5s)"
     research = status_json.get("research_candidates", [])
+    market_eligibility = status_json.get("market_eligibility")
+    if not isinstance(market_eligibility, dict):
+        market_eligibility = telemetry.summarize_market_eligibility(
+            run_id=str(run_id) if run_id and run_id != "unknown" else None,
+        )
+
+    eligibility_scope = market_eligibility_scope_label(market_eligibility)
+    reason_scope_label = "recent events" if market_eligibility.get("reason_counts_scope") == "recent_run_events" else "events"
 
     lines = []
     lines.append("=" * 72)
@@ -168,11 +182,50 @@ def render_status(runtime_dir: Path, now_ts: float | None = None) -> str:
     lines.append("--- SETTLEMENT ---")
     lines.append(f"Resolved trades: {resolved_count}")
     lines.append(f"Win rate:        {win_rate * 100:.1f}%")
-    if latest_settlement:
-        lines.append(f"Last settled:    {latest_settlement.get('slot_id', '?')}  payout={latest_settlement.get('payout', '?')}")
+    if latest_slot_resolution:
+        slot_id = latest_slot_resolution.get("slot_id", "?")
+        event_type = latest_slot_resolution.get("event_type")
+        winning_outcome = latest_slot_resolution.get("winning_outcome", "?")
+        position_count = int(latest_slot_resolution.get("position_count", 0) or 0)
+        if event_type == "slot_closed":
+            lines.append(f"Last slot resolved: {slot_id}  closed flat at expiry (winner={winning_outcome})")
+        elif position_count > 1:
+            realized = float(latest_slot_resolution.get("realized_pnl", 0.0) or 0.0)
+            lines.append(
+                f"Last slot resolved: {slot_id}  winner={winning_outcome}  multi-leg settlement legs={position_count} realized=${realized:+.2f}"
+            )
+        elif latest_slot_resolution.get("position_outcome") is None and latest_slot_resolution.get("realized_pnl") is None:
+            lines.append(f"Last slot resolved: {slot_id}  resolved with no held position (winner={winning_outcome})")
+        else:
+            lines.append(f"Last slot resolved: {slot_id}  winner={winning_outcome}")
     else:
-        lines.append("Last settled:    none")
+        lines.append("Last slot resolved: none")
+
+    if latest_position_settlement:
+        lines.append(
+            "Last position settlement: {slot_id}  outcome={outcome} size={size:.2f} entry=${entry:.3f} realized=${realized:+.2f}".format(
+                slot_id=latest_position_settlement.get("slot_id", "?"),
+                outcome=latest_position_settlement.get("position_outcome") or latest_position_settlement.get("outcome", "?"),
+                size=float(latest_position_settlement.get("position_size", latest_position_settlement.get("quantity", 0.0)) or 0.0),
+                entry=float(latest_position_settlement.get("entry_price", latest_position_settlement.get("average_price", 0.0)) or 0.0),
+                realized=float(latest_position_settlement.get("realized_pnl", latest_position_settlement.get("realized_pnl_delta", 0.0)) or 0.0),
+            )
+        )
+    elif latest_settlement:
+        lines.append(f"Last position settlement: {latest_settlement}")
+    else:
+        lines.append("Last position settlement: none")
     lines.append("")
+
+    gate_state = status_json.get("gate_state")
+    if gate_state:
+        lines.append("--- RUNTIME GATE ---")
+        lines.append(f"Runtime gate: {gate_state}  New orders paused: {bool(status_json.get('new_order_pause', False))}")
+        gate_reasons = status_json.get("gate_reasons", []) or []
+        if gate_reasons:
+            lines.append(f"Gate reasons: {'; '.join(str(item) for item in gate_reasons)}")
+        lines.extend(pause_surface_lines(status_json))
+        lines.append("")
 
     # Family metrics
     lines.append("--- FAMILY METRICS ---")
@@ -194,6 +247,20 @@ def render_status(runtime_dir: Path, now_ts: float | None = None) -> str:
 
     # Markets
     lines.append(f"Fetched markets: {fetched}  Toxic skips: {toxic_skips}")
+    lines.append(
+        "Market eligibility ({scope}-scoped): discovered={discovered} structural={structural} governance={governance} quoted/entered={quoted}".format(
+            scope=eligibility_scope,
+            discovered=int(market_eligibility.get("discovered_markets", 0) or 0),
+            structural=int(market_eligibility.get("structurally_untradeable_markets", 0) or 0),
+            governance=int(market_eligibility.get("governance_blocked_markets", 0) or 0),
+            quoted=int(market_eligibility.get("quoted_or_entered_markets", 0) or 0),
+        )
+    )
+    lines.append(f"Structural reasons ({reason_scope_label}): {format_reason_counts(market_eligibility.get('top_structural_reasons', []))}")
+    lines.append(f"Governance reasons ({reason_scope_label}): {format_reason_counts(market_eligibility.get('top_governance_reasons', []))}")
+    quote_skip_reasons = market_eligibility.get("top_quote_skip_reasons", [])
+    if quote_skip_reasons:
+        lines.append(f"Quote skip reasons ({reason_scope_label}): {format_reason_counts(quote_skip_reasons)}")
     lines.append("")
 
     # Research
