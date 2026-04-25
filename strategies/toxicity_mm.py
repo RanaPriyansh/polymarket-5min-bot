@@ -36,6 +36,15 @@ class ToxicityMM:
         self.kelly_fraction = params["kelly_fraction"]
         self.timeframes = params["timeframes"]
         self.max_position = params["max_position"]
+        strict_cfg = params.get("strict_controls", {}) or {}
+        self.strict_mode = bool(strict_cfg.get("enabled", True))
+        self.no_fresh_quotes_under_tte_seconds = float(strict_cfg.get("no_fresh_quotes_under_tte_seconds", 90.0))
+        self.spot_veto_move_pct = float(strict_cfg.get("spot_veto_move_pct", 0.30))
+        self.spot_veto_momentum = float(strict_cfg.get("spot_veto_momentum", 0.60))
+        self.adverse_size_multiplier = float(strict_cfg.get("adverse_size_multiplier", 0.50))
+        self.adverse_move_pct = float(strict_cfg.get("adverse_move_pct", 0.08))
+        self.adverse_momentum = float(strict_cfg.get("adverse_momentum", 0.15))
+        self.tte_spread_multipliers = strict_cfg.get("tte_spread_multipliers", {}) or {}
         self.paper_max_notional_usd = float(execution_cfg.get("mm_paper_max_notional_usd", 5.0))
         self.base_spread_bps = 5
         self.position_risk_limit = 0.1
@@ -74,6 +83,14 @@ class ToxicityMM:
             primary_outcome = orderbook.outcome_labels[0]
         quality = self.assess_book(orderbook, primary_outcome)
         inventory = self._inventory_for(market_id, primary_outcome)
+        if context is not None and self.strict_mode and context.seconds_to_expiry < self.no_fresh_quotes_under_tte_seconds:
+            if inventory != 0:
+                return self._endgame_quote(market_id, primary_outcome, orderbook, quality, inventory)
+            if context.seconds_to_expiry < 30.0:
+                quality.reasons.append("endgame_no_new_orders")
+            else:
+                quality.reasons.append("no_fresh_toxicity_quotes_under_tte")
+            return None, None, quality
         if context is not None and context.seconds_to_expiry < 30.0:
             return self._endgame_quote(market_id, primary_outcome, orderbook, quality, inventory)
 
@@ -91,6 +108,11 @@ class ToxicityMM:
             quality.reasons.append("missing_mid")
             quality.is_tradeable = False
             return None, None, quality
+
+        if context is not None and self.strict_mode:
+            veto_bid, veto_ask = self._spot_side_vetoes(primary_outcome, context)
+        else:
+            veto_bid, veto_ask = False, False
 
         spread = self.get_optimal_spread(0.02, vpin, quality)
         reason_parts = [f"VPIN={vpin:.2f}", f"book_spread_bps={quality.spread_bps:.1f}"]
@@ -122,6 +144,13 @@ class ToxicityMM:
         bid_size = size
         ask_size = size
         if context is not None:
+            bid_adverse_mult, ask_adverse_mult = self._side_adverse_size_multipliers(primary_outcome, context)
+            if bid_adverse_mult < 1.0:
+                bid_size *= bid_adverse_mult
+                reason_parts.append(f"bid_adverse_size_mult={bid_adverse_mult:.2f}")
+            if ask_adverse_mult < 1.0:
+                ask_size *= ask_adverse_mult
+                reason_parts.append(f"ask_adverse_size_mult={ask_adverse_mult:.2f}")
             tte_size_mult = max(0.0, 0.4 + 0.6 * float(context.tte_pct))
             bid_size = max(bid_size * tte_size_mult, 0.01)
             ask_size = max(ask_size * tte_size_mult, 0.01)
@@ -134,6 +163,16 @@ class ToxicityMM:
                 bid_size *= 1.25
                 ask_size *= 0.75
                 reason_parts.append("imbalance_fade=bid_heavier")
+        if veto_bid:
+            bid_size = 0.0
+            reason_parts.append("spot_momentum_adverse_veto=bid")
+        if veto_ask:
+            ask_size = 0.0
+            reason_parts.append("spot_momentum_adverse_veto=ask")
+        if bid_size <= 0 and ask_size <= 0:
+            quality.reasons.append("spot_momentum_adverse_veto")
+            quality.is_tradeable = False
+            return None, None, quality
         reason_parts.append(f"quote_spread={spread:.3%}")
         quote = MMQuote(
             market_id=market_id,
@@ -156,13 +195,75 @@ class ToxicityMM:
 
     def _tte_spread_multiplier(self, seconds_to_expiry: float) -> float:
         tte = float(seconds_to_expiry)
+        if not self.strict_mode:
+            if tte > 180.0:
+                return 1.0
+            if tte >= 60.0:
+                return 1.3
+            if tte >= 30.0:
+                return 1.8
+            return 3.0
+        if self.tte_spread_multipliers:
+            if tte > 180.0:
+                return float(self.tte_spread_multipliers.get("early", 1.0))
+            if tte > 90.0:
+                return float(self.tte_spread_multipliers.get("mid", 1.6))
+            if tte > 30.0:
+                return float(self.tte_spread_multipliers.get("late", 2.5))
+            return float(self.tte_spread_multipliers.get("endgame", 4.0))
         if tte > 180.0:
             return 1.0
+        if tte > 90.0:
+            return 1.6
         if tte >= 60.0:
-            return 1.3
+            return 2.0
         if tte >= 30.0:
-            return 1.8
-        return 3.0
+            return 2.5
+        return 4.0
+
+    def _outcome_direction(self, outcome: str) -> int:
+        text = str(outcome or "").strip().lower()
+        if text in {"up", "yes"}:
+            return 1
+        if text in {"down", "no"}:
+            return -1
+        return 0
+
+    def _spot_side_vetoes(self, outcome: str, context: MarketContext) -> tuple[bool, bool]:
+        direction = self._outcome_direction(outcome)
+        if direction == 0:
+            return False, False
+        move = float(getattr(context, "spot_move_pct_window", 0.0) or 0.0)
+        momentum = float(getattr(context, "momentum_score", 0.0) or 0.0)
+        bid_adverse = (-direction * move) >= self.spot_veto_move_pct and (-direction * momentum) >= self.spot_veto_momentum
+        ask_adverse = (direction * move) >= self.spot_veto_move_pct and (direction * momentum) >= self.spot_veto_momentum
+        return bid_adverse, ask_adverse
+
+    def _side_adverse_size_multipliers(self, outcome: str, context: MarketContext) -> tuple[float, float]:
+        if not self.strict_mode:
+            return 1.0, 1.0
+        direction = self._outcome_direction(outcome)
+        if direction == 0:
+            return 1.0, 1.0
+        move = float(getattr(context, "spot_move_pct_window", 0.0) or 0.0)
+        momentum = float(getattr(context, "momentum_score", 0.0) or 0.0)
+        imbalance = float(getattr(context, "imbalance_yes", 0.0) or 0.0)
+        mult = max(0.0, min(1.0, self.adverse_size_multiplier))
+        bid_mult = 1.0
+        ask_mult = 1.0
+        if (-direction * move) >= self.adverse_move_pct or (-direction * momentum) >= self.adverse_momentum:
+            bid_mult = min(bid_mult, mult)
+        if (direction * move) >= self.adverse_move_pct or (direction * momentum) >= self.adverse_momentum:
+            ask_mult = min(ask_mult, mult)
+        if direction > 0 and imbalance >= 0.65:
+            bid_mult = min(bid_mult, mult)
+        elif direction > 0 and imbalance <= -0.65:
+            ask_mult = min(ask_mult, mult)
+        elif direction < 0 and imbalance <= -0.65:
+            bid_mult = min(bid_mult, mult)
+        elif direction < 0 and imbalance >= 0.65:
+            ask_mult = min(ask_mult, mult)
+        return bid_mult, ask_mult
 
     def _clamp_price(self, price: float) -> float:
         return max(0.01, min(float(price), 0.99))

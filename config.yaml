@@ -60,7 +60,23 @@ strategies:
   toxicity_mm:
     kelly_fraction: 0.2
     max_position: 1000
-    min_seconds_to_expiry_for_new_orders: 30
+    min_seconds_to_expiry_for_new_orders: 90
+    quote_reprice_threshold: 0.005
+    quote_size_reduction_refresh_pct: 0.10
+    quote_ttl_seconds: 15
+    strict_controls:
+      enabled: true
+      no_fresh_quotes_under_tte_seconds: 90
+      spot_veto_move_pct: 0.30
+      spot_veto_momentum: 0.60
+      adverse_move_pct: 0.08
+      adverse_momentum: 0.15
+      adverse_size_multiplier: 0.50
+      tte_spread_multipliers:
+        early: 1.0
+        mid: 1.6
+        late: 2.5
+        endgame: 4.0
     spread_multiplier: 1.5
     timeframes:
     - 5m

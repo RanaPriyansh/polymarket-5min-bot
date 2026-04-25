@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from cli import _risk_reduce_toxicity_quote
+from cli import _risk_reduce_toxicity_quote, _toxicity_mm_quote_refresh_decision
 from market_context import MarketContext
 from market_data import OrderBook
 from strategies.toxicity_mm import ToxicityMM
@@ -80,15 +80,186 @@ class ToxicityMMTTETest(unittest.TestCase):
         self.mm = ToxicityMM(copy.deepcopy(BASE_CFG))
         self.orderbook = make_orderbook()
 
-    def test_tte_above_180_and_tte_60_produce_different_spreads(self):
+    def test_tte_above_180_and_tte_120_produce_different_spreads(self):
         early, _, _ = self.mm.generate_quotes("m1", self.orderbook, preferred_outcome="Up", context=make_context(seconds_to_expiry=181))
-        late, _, _ = self.mm.generate_quotes("m1", self.orderbook, preferred_outcome="Up", context=make_context(seconds_to_expiry=60))
+        late, _, _ = self.mm.generate_quotes("m1", self.orderbook, preferred_outcome="Up", context=make_context(seconds_to_expiry=120))
 
         self.assertIsNotNone(early)
         self.assertIsNotNone(late)
         early_spread = early.ask_price - early.bid_price
         late_spread = late.ask_price - late.bid_price
         self.assertGreater(late_spread, early_spread)
+
+    def test_no_fresh_non_risk_reducing_quotes_under_90s_strict_mode(self):
+        quote, other, quality = self.mm.generate_quotes(
+            "m1",
+            self.orderbook,
+            preferred_outcome="Up",
+            context=make_context(seconds_to_expiry=89),
+        )
+
+        self.assertIsNone(quote)
+        self.assertIsNone(other)
+        self.assertIn("no_fresh_toxicity_quotes_under_tte", quality.reasons)
+
+    def test_strict_mode_flatten_still_allowed_under_90s(self):
+        self.mm.positions = {"m1": {"Up": {"size": 4.0, "avg": 0.48}}}
+
+        quote, other, quality = self.mm.generate_quotes(
+            "m1",
+            self.orderbook,
+            preferred_outcome="Up",
+            context=make_context(seconds_to_expiry=89),
+        )
+
+        self.assertIsNotNone(quote)
+        self.assertIsNone(other)
+        self.assertEqual(quote.bid_size, 0.0)
+        self.assertEqual(quote.ask_size, 4.0)
+        self.assertIn("endgame_flatten", quote.reason)
+        self.assertTrue(quality.is_tradeable)
+
+    def test_spread_widens_more_as_tte_falls_under_strict_mode(self):
+        early, _, _ = self.mm.generate_quotes("m1", self.orderbook, preferred_outcome="Up", context=make_context(seconds_to_expiry=181))
+        mid, _, _ = self.mm.generate_quotes("m1", self.orderbook, preferred_outcome="Up", context=make_context(seconds_to_expiry=120))
+
+        self.assertIsNotNone(early)
+        self.assertIsNotNone(mid)
+        self.assertGreater(mid.ask_price - mid.bid_price, early.ask_price - early.bid_price)
+
+    def test_adverse_spot_veto_skips_up_bid_when_spot_falls(self):
+        quote, other, quality = self.mm.generate_quotes(
+            "m1",
+            self.orderbook,
+            preferred_outcome="Up",
+            context=make_context(seconds_to_expiry=181, tte_pct=0.9, imbalance_yes=0.0),
+        )
+        self.assertIsNotNone(quote)
+
+        adverse_context = make_context(seconds_to_expiry=181, tte_pct=0.9, imbalance_yes=0.0)
+        adverse_context.spot_move_pct_window = -0.35
+        adverse_context.momentum_score = -0.7
+        quote, other, quality = self.mm.generate_quotes(
+            "m1",
+            self.orderbook,
+            preferred_outcome="Up",
+            context=adverse_context,
+        )
+
+        self.assertIsNotNone(quote)
+        self.assertIsNone(other)
+        self.assertEqual(quote.bid_size, 0.0)
+        self.assertGreater(quote.ask_size, 0.0)
+        self.assertIn("spot_momentum_adverse_veto=bid", quote.reason)
+
+    def test_size_decreases_under_adverse_conditions_without_full_veto(self):
+        neutral, _, _ = self.mm.generate_quotes(
+            "m1", self.orderbook, preferred_outcome="Up", context=make_context(seconds_to_expiry=181, tte_pct=0.9)
+        )
+        adverse_context = make_context(seconds_to_expiry=181, tte_pct=0.9, imbalance_yes=0.7)
+        adverse_context.spot_move_pct_window = -0.10
+        adverse_context.momentum_score = -0.2
+        adverse, _, _ = self.mm.generate_quotes("m1", self.orderbook, preferred_outcome="Up", context=adverse_context)
+
+        self.assertIsNotNone(neutral)
+        self.assertIsNotNone(adverse)
+        self.assertLess(adverse.bid_size, neutral.bid_size)
+        self.assertGreaterEqual(adverse.ask_size, neutral.ask_size)
+        self.assertIn("bid_adverse_size_mult", adverse.reason)
+
+    def test_quote_refresh_decision_keeps_fresh_quote_with_small_price_move(self):
+        quote, _, _ = self.mm.generate_quotes("m1", self.orderbook, preferred_outcome="Up", context=make_context(seconds_to_expiry=181))
+        existing_orders = {
+            "bid": {"order_id": "bid1", "side": "BUY", "price": quote.bid_price + 0.001, "size": quote.bid_size, "timestamp": 100.0},
+            "ask": {"order_id": "ask1", "side": "SELL", "price": quote.ask_price - 0.001, "size": quote.ask_size, "timestamp": 100.0},
+        }
+
+        decision = _toxicity_mm_quote_refresh_decision(
+            quote,
+            existing_orders=existing_orders,
+            now_ts=103.0,
+            price_threshold=0.005,
+            ttl_seconds=10.0,
+        )
+
+        self.assertFalse(decision["refresh"])
+        self.assertEqual(decision["reason"], "quote_reuse_within_threshold")
+
+    def test_quote_refresh_decision_reprices_when_stale_or_moved(self):
+        quote, _, _ = self.mm.generate_quotes("m1", self.orderbook, preferred_outcome="Up", context=make_context(seconds_to_expiry=181))
+        existing_orders = {
+            "bid": {"order_id": "bid1", "side": "BUY", "price": quote.bid_price - 0.02, "size": quote.bid_size, "timestamp": 100.0},
+            "ask": {"order_id": "ask1", "side": "SELL", "price": quote.ask_price, "size": quote.ask_size, "timestamp": 100.0},
+        }
+
+        moved = _toxicity_mm_quote_refresh_decision(
+            quote,
+            existing_orders=existing_orders,
+            now_ts=103.0,
+            price_threshold=0.005,
+            ttl_seconds=10.0,
+        )
+        stale = _toxicity_mm_quote_refresh_decision(
+            quote,
+            existing_orders=existing_orders,
+            now_ts=111.0,
+            price_threshold=0.05,
+            ttl_seconds=10.0,
+        )
+
+        self.assertTrue(moved["refresh"])
+        self.assertEqual(moved["reason"], "quote_reprice_threshold")
+        self.assertTrue(stale["refresh"])
+        self.assertEqual(stale["reason"], "quote_ttl_expired")
+
+    def test_quote_refresh_decision_reprices_when_size_reduced(self):
+        quote, _, _ = self.mm.generate_quotes("m1", self.orderbook, preferred_outcome="Up", context=make_context(seconds_to_expiry=181))
+        existing_orders = {
+            "bid": {"order_id": "bid1", "side": "BUY", "price": quote.bid_price, "size": quote.bid_size * 2, "timestamp": 100.0},
+            "ask": {"order_id": "ask1", "side": "SELL", "price": quote.ask_price, "size": quote.ask_size, "timestamp": 100.0},
+        }
+
+        decision = _toxicity_mm_quote_refresh_decision(
+            quote,
+            existing_orders=existing_orders,
+            now_ts=103.0,
+            price_threshold=0.05,
+            ttl_seconds=10.0,
+            size_reduction_threshold=0.10,
+        )
+
+        self.assertTrue(decision["refresh"])
+        self.assertEqual(decision["reason"], "quote_size_reduced")
+        self.assertGreaterEqual(decision["size_reduction"], 0.10)
+
+    def test_quote_refresh_decision_reprices_when_extra_side_would_remain(self):
+        quote, _, _ = self.mm.generate_quotes("m1", self.orderbook, preferred_outcome="Up", context=make_context(seconds_to_expiry=181))
+        quote = quote.__class__(
+            market_id=quote.market_id,
+            outcome=quote.outcome,
+            bid_price=0.0,
+            ask_price=quote.ask_price,
+            bid_size=0.0,
+            ask_size=quote.ask_size,
+            reason=f"{quote.reason}|risk_reduce_only",
+            book_quality=quote.book_quality,
+        )
+        existing_orders = {
+            "bid": {"order_id": "bid1", "side": "BUY", "price": 0.49, "size": 2.0, "timestamp": 100.0},
+            "ask": {"order_id": "ask1", "side": "SELL", "price": quote.ask_price, "size": quote.ask_size, "timestamp": 100.0},
+        }
+
+        decision = _toxicity_mm_quote_refresh_decision(
+            quote,
+            existing_orders=existing_orders,
+            now_ts=103.0,
+            price_threshold=0.05,
+            ttl_seconds=10.0,
+        )
+
+        self.assertTrue(decision["refresh"])
+        self.assertEqual(decision["reason"], "extra_quote_side")
+        self.assertEqual(decision["extra_sides"], ["bid"])
 
     def test_tte_under_30_produces_no_new_quote_without_inventory(self):
         quote, other, quality = self.mm.generate_quotes("m1", self.orderbook, preferred_outcome="Up", context=make_context(seconds_to_expiry=29))
@@ -194,7 +365,7 @@ class ToxicityMMTTETest(unittest.TestCase):
             "m1",
             self.orderbook,
             preferred_outcome="Up",
-            context=make_context(seconds_to_expiry=75),
+            context=make_context(seconds_to_expiry=91),
         )
 
         reduced = _risk_reduce_toxicity_quote(quote, inventory=4.0)
@@ -212,7 +383,7 @@ class ToxicityMMTTETest(unittest.TestCase):
             "m1",
             self.orderbook,
             preferred_outcome="Up",
-            context=make_context(seconds_to_expiry=75),
+            context=make_context(seconds_to_expiry=91),
         )
 
         reduced = _risk_reduce_toxicity_quote(quote, inventory=-3.0)

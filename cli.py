@@ -639,6 +639,75 @@ def _risk_reduce_toxicity_quote(quote, *, inventory: float):
     )
 
 
+def _toxicity_mm_existing_quote_orders(executor, market_id: str, outcome: str) -> Dict[str, Dict]:
+    open_statuses = {"open", "partially_filled", "acknowledged"}
+    result: Dict[str, Dict] = {}
+    for order in getattr(executor, "orders", {}).values():
+        if order.get("market_id") != market_id:
+            continue
+        if order.get("strategy_family") != "toxicity_mm" or order.get("order_kind") != "quote":
+            continue
+        if order.get("outcome") != outcome or order.get("status") not in open_statuses:
+            continue
+        side_key = "bid" if str(order.get("side") or "").upper() == "BUY" else "ask"
+        result[side_key] = order
+    return result
+
+
+def _toxicity_mm_quote_refresh_decision(
+    quote,
+    *,
+    existing_orders: Dict[str, Dict] | None,
+    now_ts: float,
+    price_threshold: float,
+    ttl_seconds: float,
+    size_reduction_threshold: float = 0.10,
+) -> Dict[str, object]:
+    if quote is None:
+        return {"refresh": False, "reason": "no_quote"}
+    if "endgame_flatten" in str(getattr(quote, "reason", "")):
+        return {"refresh": True, "reason": "flatten_refresh"}
+    existing_orders = existing_orders or {}
+    desired = []
+    if float(getattr(quote, "bid_size", 0.0) or 0.0) > 0:
+        desired.append(("bid", float(getattr(quote, "bid_price", 0.0) or 0.0), float(getattr(quote, "bid_size", 0.0) or 0.0)))
+    if float(getattr(quote, "ask_size", 0.0) or 0.0) > 0:
+        desired.append(("ask", float(getattr(quote, "ask_price", 0.0) or 0.0), float(getattr(quote, "ask_size", 0.0) or 0.0)))
+    if not desired:
+        return {"refresh": False, "reason": "zero_sized_quote"}
+    for side, _, _ in desired:
+        if side not in existing_orders:
+            return {"refresh": True, "reason": "missing_quote_side"}
+    desired_sides = {side for side, _, _ in desired}
+    extra_sides = sorted(set(existing_orders) - desired_sides)
+    if extra_sides:
+        return {"refresh": True, "reason": "extra_quote_side", "extra_sides": extra_sides}
+    max_age = 0.0
+    max_price_delta = 0.0
+    max_size_reduction = 0.0
+    for side, desired_price, desired_size in desired:
+        order = existing_orders[side]
+        created_ts = float(order.get("created_ts", order.get("timestamp", now_ts)) or now_ts)
+        max_age = max(max_age, float(now_ts) - created_ts)
+        max_price_delta = max(max_price_delta, abs(float(order.get("price", 0.0) or 0.0) - desired_price))
+        existing_size = float(order.get("remaining_size", order.get("remaining_qty", order.get("size", 0.0))) or 0.0)
+        if existing_size > 0 and desired_size < existing_size:
+            max_size_reduction = max(max_size_reduction, (existing_size - desired_size) / existing_size)
+    if max_age >= float(ttl_seconds):
+        return {"refresh": True, "reason": "quote_ttl_expired", "age_seconds": round(max_age, 3)}
+    if max_price_delta >= float(price_threshold):
+        return {"refresh": True, "reason": "quote_reprice_threshold", "price_delta": round(max_price_delta, 6)}
+    if max_size_reduction >= float(size_reduction_threshold):
+        return {"refresh": True, "reason": "quote_size_reduced", "size_reduction": round(max_size_reduction, 6)}
+    return {
+        "refresh": False,
+        "reason": "quote_reuse_within_threshold",
+        "age_seconds": round(max_age, 3),
+        "price_delta": round(max_price_delta, 6),
+        "size_reduction": round(max_size_reduction, 6),
+    }
+
+
 def _entry_gate_for_market(
     cfg: dict,
     market: Dict,
@@ -1236,43 +1305,65 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     "cancelled_orders": cancelled_count,
                                 })
                             else:
-                                await executor.cancel_family_market(market_id, "toxicity_mm")
-                                bid_id = None
-                                ask_id = None
-                                quote_post_only = _quote_submission_post_only(quote_yes.reason)
-                                if quote_yes.bid_size > 0:
-                                    bid_id = await executor.place_order(
-                                        market_id,
-                                        quote_yes.outcome,
-                                        "BUY",
-                                        quote_yes.bid_size,
-                                        quote_yes.bid_price,
-                                        post_only=quote_post_only,
-                                        strategy_family="toxicity_mm",
-                                        order_kind="quote",
-                                        market=market,
-                                    )
-                                if quote_yes.ask_size > 0:
-                                    ask_id = await executor.place_order(
-                                        market_id,
-                                        quote_yes.outcome,
-                                        "SELL",
-                                        quote_yes.ask_size,
-                                        quote_yes.ask_price,
-                                        post_only=quote_post_only,
-                                        strategy_family="toxicity_mm",
-                                        order_kind="quote",
-                                        market=market,
-                                    )
-                                runtime.append_event("quote.submitted", {
-                                    "market_id": market_id,
-                                    "market_slug": market["slug"],
-                                    "strategy_family": "toxicity_mm",
-                                    "bid_order_id": bid_id,
-                                    "ask_order_id": ask_id,
-                                    "reason": quote_yes.reason,
-                                    "book_quality": quote_yes.book_quality,
-                                })
+                                mm_cfg = (cfg.get("strategies", {}) or {}).get("toxicity_mm", {}) or {}
+                                existing_quote_orders = _toxicity_mm_existing_quote_orders(executor, market_id, quote_yes.outcome)
+                                refresh_decision = _toxicity_mm_quote_refresh_decision(
+                                    quote_yes,
+                                    existing_orders=existing_quote_orders,
+                                    now_ts=loop_now,
+                                    price_threshold=float(mm_cfg.get("quote_reprice_threshold", 0.005)),
+                                    ttl_seconds=float(mm_cfg.get("quote_ttl_seconds", 15.0)),
+                                    size_reduction_threshold=float(mm_cfg.get("quote_size_reduction_refresh_pct", 0.10)),
+                                )
+                                if not bool(refresh_decision.get("refresh")):
+                                    runtime.append_event("quote.reused", {
+                                        "market_id": market_id,
+                                        "market_slug": market["slug"],
+                                        "strategy_family": "toxicity_mm",
+                                        "outcome": quote_yes.outcome,
+                                        "reason": refresh_decision.get("reason"),
+                                        "decision": refresh_decision,
+                                    })
+                                else:
+                                    await executor.cancel_family_market(market_id, "toxicity_mm")
+                                    bid_id = None
+                                    ask_id = None
+                                    quote_post_only = _quote_submission_post_only(quote_yes.reason)
+                                    if quote_yes.bid_size > 0:
+                                        bid_id = await executor.place_order(
+                                            market_id,
+                                            quote_yes.outcome,
+                                            "BUY",
+                                            quote_yes.bid_size,
+                                            quote_yes.bid_price,
+                                            post_only=quote_post_only,
+                                            strategy_family="toxicity_mm",
+                                            order_kind="quote",
+                                            market=market,
+                                        )
+                                    if quote_yes.ask_size > 0:
+                                        ask_id = await executor.place_order(
+                                            market_id,
+                                            quote_yes.outcome,
+                                            "SELL",
+                                            quote_yes.ask_size,
+                                            quote_yes.ask_price,
+                                            post_only=quote_post_only,
+                                            strategy_family="toxicity_mm",
+                                            order_kind="quote",
+                                            market=market,
+                                        )
+                                    runtime.append_event("quote.submitted", {
+                                        "market_id": market_id,
+                                        "market_slug": market["slug"],
+                                        "strategy_family": "toxicity_mm",
+                                        "bid_order_id": bid_id,
+                                        "ask_order_id": ask_id,
+                                        "reason": quote_yes.reason,
+                                        "refresh_reason": refresh_decision.get("reason"),
+                                        "refresh_decision": refresh_decision,
+                                        "book_quality": quote_yes.book_quality,
+                                    })
 
                     _emit_events(runtime, [{**fill, "event_type": "order.filled"} for fill in fill_events], run_id=run_id)
                     settlement_events = await executor.process_pending_resolutions(now_ts=time.time())
