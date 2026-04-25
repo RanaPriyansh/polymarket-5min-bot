@@ -4,6 +4,8 @@ from pathlib import Path
 
 from cli import (
     _aggregate_gate_pause_decision,
+    _bucket_pause_decision_for_market,
+    _bucket_pause_status,
     _entry_gate_for_market,
     _gate_pause_decision,
     _quote_submission_post_only,
@@ -217,6 +219,61 @@ class RuntimeEntryPolicyTests(unittest.TestCase):
         )
         self.assertTrue(allowed)
         self.assertEqual(reasons, [])
+
+    def test_bucket_pause_blocks_new_non_risk_reducing_orders(self):
+        market = {"id": "m1", "slug": "btc-updown-5m-100", "asset": "btc", "interval_minutes": 5, "end_ts": 400.0}
+        pause_row = {
+            "family": "time_decay",
+            "asset": "btc",
+            "interval": "5",
+            "tte_bucket": "120-300s",
+            "settled_trades": 20,
+            "pause": True,
+            "pause_reason": "negative_pnl_per_trade<-0.010000>",
+        }
+        allowed, reasons = _entry_gate_for_market(
+            {"research": {"bucket_pause_enabled": True, "bucket_pause_warn_only": False}},
+            market,
+            now_ts=100.0,
+            strategy_family="time_decay",
+            gate_state="GREEN",
+            gate_reasons=[],
+            bucket_pause_decisions={("time_decay", "btc", "5", "120-300s"): pause_row},
+            tte_bucket="120-300s",
+        )
+        self.assertFalse(allowed)
+        self.assertIn("bucket_paused", reasons)
+
+    def test_bucket_pause_allows_risk_reducing_orders(self):
+        market = {"id": "m1", "slug": "btc-updown-5m-100", "asset": "btc", "interval_minutes": 5, "end_ts": 400.0}
+        pause_row = {
+            "family": "toxicity_mm",
+            "asset": "btc",
+            "interval": "5",
+            "tte_bucket": "120-300s",
+            "settled_trades": 20,
+            "pause": True,
+            "pause_reason": "negative_pnl_per_trade<-0.010000>",
+        }
+        allowed, reasons = _entry_gate_for_market(
+            {"research": {"bucket_pause_enabled": True, "bucket_pause_warn_only": False}},
+            market,
+            now_ts=100.0,
+            strategy_family="toxicity_mm",
+            gate_state="GREEN",
+            gate_reasons=[],
+            bucket_pause_decisions={("toxicity_mm", "btc", "5", "120-300s"): pause_row},
+            tte_bucket="120-300s",
+            allow_bucket_pause_for_risk_reducing=True,
+        )
+        self.assertTrue(allowed)
+        self.assertIn("bucket_paused", reasons)
+
+    def test_bucket_pause_status_surfaces_paused_count(self):
+        row = {"family": "toxicity_mm", "asset": "btc", "interval": "5", "tte_bucket": "120-300s", "pause": True}
+        status = _bucket_pause_status({("toxicity_mm", "btc", "5", "120-300s"): row})
+        self.assertEqual(status["paused_bucket_count"], 1)
+        self.assertEqual(status["paused_buckets"][0]["family"], "toxicity_mm")
 
     def test_entry_gate_can_block_for_schema_truth_when_configured(self):
         market = {

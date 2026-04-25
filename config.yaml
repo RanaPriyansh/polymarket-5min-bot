@@ -85,5 +85,9 @@ strategies:
     directional_signal_entry_style: resting_limit
 runtime:
   dir: data/runtime
+research:
+  bucket_pause_enabled: true
+  bucket_pause_warn_only: false
+  bucket_pause_min_settled_trades: 20
 telegram:
   enabled: false

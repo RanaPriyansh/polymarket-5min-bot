@@ -212,7 +212,7 @@ class ResearchLoop:
     def _timestamped_files(self, pattern: str) -> List[Path]:
         files = [
             path for path in self.artifact_dir.glob(pattern)
-            if path.name not in {"latest.json", "latest.md", "family_scoreboard.json"}
+            if path.name not in {"latest.json", "latest.md", "family_scoreboard.json", "bucket_scoreboard.json"}
         ]
         return sorted(files, key=lambda p: p.stat().st_mtime)
 

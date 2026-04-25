@@ -136,6 +136,25 @@ def pause_surface_lines(status: dict[str, Any]) -> list[str]:
                 for family, decision in sorted(pause_family_decisions.items())
             )
         )
+    bucket_pause = status.get("bucket_pause", {}) or {}
+    paused_buckets = bucket_pause.get("paused_buckets", []) or []
+    if bucket_pause:
+        lines.append(
+            f"Bucket pause: paused={int(bucket_pause.get('paused_bucket_count', 0) or 0)}"
+        )
+    if paused_buckets:
+        rendered = []
+        for row in paused_buckets[:8]:
+            rendered.append(
+                "{family}/{asset}/{interval}m/{tte} ({reason})".format(
+                    family=row.get("family", "?"),
+                    asset=row.get("asset", "?"),
+                    interval=row.get("interval", "?"),
+                    tte=row.get("tte_bucket", "?"),
+                    reason=row.get("pause_reason", "paused"),
+                )
+            )
+        lines.append("Paused buckets: " + "; ".join(rendered))
     return lines
 
 

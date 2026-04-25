@@ -15,7 +15,14 @@ from research.loop import (
     make_cycle_id,
 )
 from runtime_telemetry import RuntimeTelemetry
-from research.experiment_registry import build_family_scoreboard, verdict_from_scoreboard, write_family_scoreboard
+from ledger import SQLiteLedger
+from research.experiment_registry import (
+    build_bucket_scoreboard,
+    build_family_scoreboard,
+    verdict_from_scoreboard,
+    write_bucket_scoreboard,
+    write_family_scoreboard,
+)
 
 
 class PolymarketRuntimeResearchAdapter(ResearchAdapter):
@@ -28,6 +35,8 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
         status = self.telemetry.read_status()
         metrics = self.telemetry.read_strategy_metrics()
         events = self.telemetry.read_events(limit=5000, run_id=self.run_id)
+        ledger_events = self._ledger_event_dicts()
+        research_events = events + ledger_events
         samples = self.telemetry.read_market_samples(limit=self.sample_limit, run_id=self.run_id)
 
         hypotheses: List[ResearchHypothesis] = []
@@ -40,13 +49,19 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
         active_families = status.get("active_strategy_families") or status.get("strategies") or []
         runtime_path = self.telemetry.runtime_dir
         research_artifact_dir = runtime_path.parent / "research" if runtime_path.name == "runtime" else runtime_path / "research"
+        min_bucket_settled = int(((status.get("bucket_pause_policy") or {}).get("min_settled_trades") or 20))
         family_scoreboard = build_family_scoreboard(
-            events,
+            research_events,
             active_families=active_families,
             candidate_families=research_candidates,
             run_fragmentation=int(status.get("run_lineage_fragmentation", 1) or 1),
         )
+        bucket_scoreboard = build_bucket_scoreboard(
+            research_events,
+            min_settled_trades=min_bucket_settled,
+        )
         write_family_scoreboard(research_artifact_dir, family_scoreboard)
+        write_bucket_scoreboard(research_artifact_dir, bucket_scoreboard)
         family_verdict = verdict_from_scoreboard(family_scoreboard)
 
         family_summaries = self._family_summaries(metrics)
@@ -253,6 +268,8 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
                 "samples_analyzed": len(samples),
                 "fill_events": len(fill_events),
                 "family_scoreboard": [row.to_dict() for row in family_scoreboard],
+                "bucket_scoreboard": [row.to_dict() for row in bucket_scoreboard],
+                "paused_buckets": [row.to_dict() for row in bucket_scoreboard if row.pause],
                 "family_verdict": family_verdict,
             },
             context=ResearchContext(
@@ -273,6 +290,25 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
             next_actions=next_actions,
             top_recommendation=top_recommendation,
         )
+
+    def _ledger_event_dicts(self) -> List[Dict]:
+        ledger_path = self.telemetry.runtime_dir / "ledger.db"
+        if not ledger_path.exists():
+            return []
+        try:
+            ledger = SQLiteLedger(ledger_path)
+            rows = ledger.list_events(run_id=self.run_id)
+        except Exception:
+            return []
+        return [
+            {
+                "event_type": event.event_type,
+                "payload": event.payload,
+                "run_id": event.run_id,
+                "ts": event.event_ts,
+            }
+            for event in rows
+        ]
 
     def _family_summaries(self, metrics: Dict) -> Dict[str, Dict]:
         summaries: Dict[str, Dict] = {}

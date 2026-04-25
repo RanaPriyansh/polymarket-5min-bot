@@ -7,6 +7,7 @@ Commands: run, backtest, paper, live, collect, research
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shlex
 import shutil
@@ -161,6 +162,7 @@ def _write_runtime_snapshot(
     risk_report: Dict,
     gate_snapshot: Dict[str, object],
     strategy_governance: Dict[str, object],
+    bucket_pause_decisions: Dict[tuple[str, str, str, str], Dict[str, object]] | None = None,
 ) -> Dict:
     active_families = [
         str(item).strip()
@@ -206,6 +208,7 @@ def _write_runtime_snapshot(
         pause_scope=str(gate_pause["scope"]),
         pause_blocking_reasons=list(gate_pause["blocking_gate_reasons"]),
         pause_family_decisions=dict(gate_pause["family_pause_decisions"]),
+        bucket_pause=_bucket_pause_status(bucket_pause_decisions),
         market_eligibility=market_eligibility,
         **strategy_governance,
     )
@@ -229,6 +232,7 @@ def _write_runtime_status_snapshot(
     risk_report: Dict,
     gate_snapshot: Dict[str, object],
     strategy_governance: Dict[str, object],
+    bucket_pause_decisions: Dict[tuple[str, str, str, str], Dict[str, object]] | None = None,
 ) -> Dict:
     return _write_runtime_snapshot(
         runtime,
@@ -247,6 +251,7 @@ def _write_runtime_status_snapshot(
         risk_report=risk_report,
         gate_snapshot=gate_snapshot,
         strategy_governance=strategy_governance,
+        bucket_pause_decisions=bucket_pause_decisions,
     )
 
 
@@ -420,6 +425,82 @@ def _should_pause_new_orders(gate_state: str, gate_reasons: List[str], *, strate
     return bool(decision["pause"])
 
 
+def _bucket_pause_cfg(cfg: dict) -> dict:
+    research_cfg = (cfg.get("research", {}) or {})
+    return {
+        "enabled": bool(research_cfg.get("bucket_pause_enabled", True)),
+        "warn_only": bool(research_cfg.get("bucket_pause_warn_only", False)),
+        "min_settled_trades": int(research_cfg.get("bucket_pause_min_settled_trades", 20) or 20),
+    }
+
+
+def _bucket_for_market(strategy_family: str, market: Dict, tte_bucket: str | None = None) -> tuple[str, str, str, str]:
+    asset = str(market.get("asset") or "unknown").lower()
+    interval = str(market.get("interval_minutes") or "unknown")
+    if not tte_bucket:
+        tte_bucket = "unknown"
+    return (str(strategy_family), asset, interval, str(tte_bucket))
+
+
+def _load_bucket_pause_decisions(runtime_dir: str | Path, cfg: dict) -> Dict[tuple[str, str, str, str], Dict[str, object]]:
+    policy = _bucket_pause_cfg(cfg)
+    if not policy["enabled"]:
+        return {}
+    runtime_path = Path(runtime_dir)
+    artifact_dir = runtime_path.parent / "research" if runtime_path.name == "runtime" else runtime_path / "research"
+    path = artifact_dir / "bucket_scoreboard.json"
+    if not path.exists():
+        return {}
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    decisions: Dict[tuple[str, str, str, str], Dict[str, object]] = {}
+    if not isinstance(rows, list):
+        return decisions
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("pause"):
+            continue
+        try:
+            settled = int(row.get("settled_trades", 0) or 0)
+        except (TypeError, ValueError):
+            settled = 0
+        if settled < int(policy["min_settled_trades"]):
+            continue
+        key = (
+            str(row.get("family") or ""),
+            str(row.get("asset") or "unknown").lower(),
+            str(row.get("interval") or "unknown"),
+            str(row.get("tte_bucket") or "unknown"),
+        )
+        decisions[key] = row
+    return decisions
+
+
+def _bucket_pause_decision_for_market(
+    bucket_pause_decisions: Dict[tuple[str, str, str, str], Dict[str, object]] | None,
+    strategy_family: str,
+    market: Dict,
+    tte_bucket: str | None,
+) -> Dict[str, object] | None:
+    if not bucket_pause_decisions:
+        return None
+    exact_key = _bucket_for_market(strategy_family, market, tte_bucket)
+    if exact_key in bucket_pause_decisions:
+        return bucket_pause_decisions[exact_key]
+    unknown_tte_key = _bucket_for_market(strategy_family, market, "unknown")
+    return bucket_pause_decisions.get(unknown_tte_key)
+
+
+def _bucket_pause_status(bucket_pause_decisions: Dict[tuple[str, str, str, str], Dict[str, object]] | None) -> dict:
+    rows = list((bucket_pause_decisions or {}).values())
+    return {
+        "enabled": True,
+        "paused_bucket_count": len(rows),
+        "paused_buckets": rows[:25],
+    }
+
+
 def _strategy_directional_signal_entry_style(cfg: dict, strategy_family: str, signal=None) -> str:
     return resolve_directional_signal_entry_style(cfg, strategy_family, signal)
 
@@ -523,6 +604,9 @@ def _entry_gate_for_market(
     strategy_family: str,
     gate_state: str,
     gate_reasons: List[str],
+    bucket_pause_decisions: Dict[tuple[str, str, str, str], Dict[str, object]] | None = None,
+    tte_bucket: str | None = None,
+    allow_bucket_pause_for_risk_reducing: bool = False,
 ) -> tuple[bool, List[str]]:
     reasons: List[str] = []
     gate_pause = _gate_pause_decision(
@@ -535,6 +619,14 @@ def _entry_gate_for_market(
         reasons.append("runtime_gate_red")
         reasons.extend([f"gate:{reason}" for reason in gate_pause["blocking_gate_reasons"] or gate_reasons])
         return False, reasons
+
+    bucket_pause = _bucket_pause_decision_for_market(bucket_pause_decisions, strategy_family, market, tte_bucket)
+    if bucket_pause:
+        reason = str(bucket_pause.get("pause_reason") or "bucket_paused")
+        reasons.append("bucket_paused")
+        reasons.append(f"bucket:{reason}")
+        if not allow_bucket_pause_for_risk_reducing and not _bucket_pause_cfg(cfg)["warn_only"]:
+            return False, reasons
 
     min_seconds = _strategy_min_seconds_to_expiry(cfg, strategy_family)
     end_ts = market.get("end_ts")
@@ -555,6 +647,8 @@ def _strategy_entry_allowed(
     now_ts: float,
     strategy_family: str,
     gate_snapshot: Dict[str, object],
+    bucket_pause_decisions: Dict[tuple[str, str, str, str], Dict[str, object]] | None = None,
+    tte_bucket: str | None = None,
 ) -> bool:
     entry_allowed, entry_reasons = _entry_gate_for_market(
         cfg,
@@ -563,6 +657,8 @@ def _strategy_entry_allowed(
         strategy_family=strategy_family,
         gate_state=str(gate_snapshot["gate_state"]),
         gate_reasons=list(gate_snapshot["gate_reasons"]),
+        bucket_pause_decisions=bucket_pause_decisions,
+        tte_bucket=tte_bucket,
     )
     if not entry_allowed:
         runtime.append_event("market.entry_blocked", {
@@ -570,6 +666,7 @@ def _strategy_entry_allowed(
             "market_slug": market["slug"],
             "strategy_family": strategy_family,
             "reasons": entry_reasons,
+            "bucket_pause": _bucket_pause_decision_for_market(bucket_pause_decisions, strategy_family, market, tte_bucket),
         })
     return entry_allowed
 
@@ -790,6 +887,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         return_exceptions=True,
                     )
                     gate_snapshot = _runtime_gate_snapshot(runtime_dir)
+                    bucket_pause_decisions = _load_bucket_pause_decisions(runtime_dir, cfg)
 
                     processed_markets = 0
                     toxic_skips = 0
@@ -867,6 +965,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                             now_ts=loop_now,
                             strategy_family="mean_reversion_5min",
                             gate_snapshot=gate_snapshot,
+                            bucket_pause_decisions=bucket_pause_decisions,
+                            tte_bucket=market_context.tte_bucket,
                         ):
                             signal = mean_rev.generate_signal(
                                 market_id,
@@ -897,6 +997,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                             now_ts=loop_now,
                             strategy_family="opening_range",
                             gate_snapshot=gate_snapshot,
+                            bucket_pause_decisions=bucket_pause_decisions,
+                            tte_bucket=market_context.tte_bucket,
                         ):
                             opening_range.update_price(market_id, mid, volume)
                             signal = opening_range.generate_signal(
@@ -928,6 +1030,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                             now_ts=loop_now,
                             strategy_family="time_decay",
                             gate_snapshot=gate_snapshot,
+                            bucket_pause_decisions=bucket_pause_decisions,
+                            tte_bucket=market_context.tte_bucket,
                         ):
                             signal = time_decay.generate_signal(market_id, market, orderbook, current_time=loop_now)
                             if signal:
@@ -953,6 +1057,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                             now_ts=loop_now,
                             strategy_family="spot_momentum",
                             gate_snapshot=gate_snapshot,
+                            bucket_pause_decisions=bucket_pause_decisions,
+                            tte_bucket=market_context.tte_bucket,
                         ):
                             signal = spot_momentum.generate_signal(market_context)
                             if signal:
@@ -984,6 +1090,9 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                 strategy_family="toxicity_mm",
                                 gate_state=str(gate_snapshot["gate_state"]),
                                 gate_reasons=list(gate_snapshot["gate_reasons"]),
+                                bucket_pause_decisions=bucket_pause_decisions,
+                                tte_bucket=market_context.tte_bucket,
+                                allow_bucket_pause_for_risk_reducing=toxicity_mm_has_exposure,
                             )
                             if _toxicity_mm_runtime_entry_allowed(
                                 entry_allowed=mm_entry_allowed,
@@ -1001,6 +1110,9 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     "market_slug": market["slug"],
                                     "strategy_family": "toxicity_mm",
                                     "reasons": mm_entry_reasons,
+                                    "bucket_pause": _bucket_pause_decision_for_market(
+                                        bucket_pause_decisions, "toxicity_mm", market, market_context.tte_bucket
+                                    ),
                                     "cancelled_orders": cancelled_count,
                                 })
 
@@ -1128,6 +1240,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         risk_report=risk_report,
                         gate_snapshot=gate_snapshot,
                         strategy_governance=strategy_governance,
+                        bucket_pause_decisions=bucket_pause_decisions,
                     )
                     click.echo(
                         "Paper bankroll ${capital:.2f} | open={open} | resolved={resolved} | pending={pending}".format(
