@@ -522,6 +522,49 @@ def _bounded_directional_signal_size(risk_mgr, strategy_family: str, signal, ref
     return min(requested_size, bounded.size) if bounded.size > 0 else 0.0
 
 
+def _mark_directional_fired_on_fill(fill: Dict, *, time_decay=None, spot_momentum=None, opening_range=None) -> Dict | None:
+    if fill.get("order_kind") != "signal":
+        return None
+    family = str(fill.get("strategy_family") or "")
+    if family not in {"mean_reversion_5min", "opening_range", "time_decay", "spot_momentum"}:
+        return None
+    slot_id = fill.get("slot_id")
+    outcome = fill.get("outcome")
+    if not slot_id or not outcome:
+        return None
+    if family == "time_decay" and time_decay is not None:
+        key = (str(slot_id), str(outcome))
+        if key in getattr(time_decay, "_fired_slots", set()):
+            return None
+        time_decay.mark_fired(str(slot_id), str(outcome))
+    elif family == "spot_momentum" and spot_momentum is not None:
+        if str(slot_id) in getattr(spot_momentum, "_fired_slots", set()):
+            return None
+        spot_momentum.mark_fired(str(slot_id))
+    elif family == "opening_range" and opening_range is not None:
+        opening_key = str(fill.get("market_id") or slot_id)
+        if opening_range.is_fired(opening_key):
+            return None
+        opening_range.mark_fired(opening_key, str(outcome))
+    return {
+        "event_type": "signal.fired_on_fill",
+        "slot_id": slot_id,
+        "market_id": fill.get("market_id"),
+        "market_slug": fill.get("market_slug"),
+        "strategy_family": family,
+        "outcome": outcome,
+        "order_id": fill.get("order_id"),
+        "reason": "filled_signal_order_consumed_slot",
+    }
+
+
+def _filled_event_from_execution_result(result: Dict) -> Dict | None:
+    for event in result.get("events", []) or []:
+        if event.get("event_type") == "order.filled" and event.get("order_kind") == "signal":
+            return event
+    return None
+
+
 def _strategy_min_seconds_to_expiry(cfg: dict, strategy_family: str) -> float:
     strategy_cfg = (cfg.get("strategies", {}) or {}).get(strategy_family, {}) or {}
     if "min_seconds_to_expiry_for_new_orders" in strategy_cfg:
@@ -932,7 +975,15 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                             "is_tradeable": book_quality.is_tradeable,
                         })
 
-                        fill_events.extend(executor.evaluate_market_orders(market_id, orderbook))
+                        new_fills = executor.evaluate_market_orders(market_id, orderbook)
+                        for fill in new_fills:
+                            fired_event = _mark_directional_fired_on_fill(fill, time_decay=time_decay, spot_momentum=spot_momentum, opening_range=opening_range)
+                            if fired_event:
+                                runtime.append_event(fired_event.pop("event_type"), fired_event, run_id=run_id)
+                        fill_events.extend(new_fills)
+                        expired_signal_events = await executor.expire_directional_signal_orders(market_id=market_id, now_ts=loop_now)
+                        if expired_signal_events:
+                            _emit_events(runtime, expired_signal_events, run_id=run_id)
                         mid = md.mid_price(orderbook, primary_outcome)
                         mean_rev.update_price(
                             market_id,
@@ -989,6 +1040,11 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     )
                                     result = await executor.execute_signal_trade(market, orderbook, signal)
                                     _emit_events(runtime, result.get("events", []), run_id=run_id)
+                                    if result.get("filled"):
+                                        fired_fill = _filled_event_from_execution_result(result)
+                                        fired_event = _mark_directional_fired_on_fill(fired_fill or result, time_decay=time_decay, spot_momentum=spot_momentum, opening_range=opening_range)
+                                        if fired_event:
+                                            runtime.append_event(fired_event.pop("event_type"), fired_event, run_id=run_id)
 
                         if "opening_range" in active_strategies and _strategy_entry_allowed(
                             runtime,
@@ -1022,6 +1078,11 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     )
                                     result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="opening_range")
                                     _emit_events(runtime, result.get("events", []), run_id=run_id)
+                                    if result.get("filled"):
+                                        fired_fill = _filled_event_from_execution_result(result)
+                                        fired_event = _mark_directional_fired_on_fill(fired_fill or result, time_decay=time_decay, spot_momentum=spot_momentum, opening_range=opening_range)
+                                        if fired_event:
+                                            runtime.append_event(fired_event.pop("event_type"), fired_event, run_id=run_id)
 
                         if "time_decay" in active_strategies and _strategy_entry_allowed(
                             runtime,
@@ -1047,8 +1108,11 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     )
                                     result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="time_decay")
                                     _emit_events(runtime, result.get("events", []), run_id=run_id)
-                                    if result.get("opened"):
-                                        time_decay.mark_signal_fired(market_id, market, orderbook, signal.outcome)
+                                    if result.get("filled"):
+                                        fired_fill = _filled_event_from_execution_result(result)
+                                        fired_event = _mark_directional_fired_on_fill(fired_fill or result, time_decay=time_decay, spot_momentum=spot_momentum, opening_range=opening_range)
+                                        if fired_event:
+                                            runtime.append_event(fired_event.pop("event_type"), fired_event, run_id=run_id)
 
                         if "spot_momentum" in active_strategies and _strategy_entry_allowed(
                             runtime,
@@ -1074,8 +1138,11 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                                     )
                                     result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="spot_momentum")
                                     _emit_events(runtime, result.get("events", []), run_id=run_id)
-                                    if result.get("opened"):
-                                        spot_momentum.mark_signal_fired(market_context)
+                                    if result.get("filled"):
+                                        fired_fill = _filled_event_from_execution_result(result)
+                                        fired_event = _mark_directional_fired_on_fill(fired_fill or result, time_decay=time_decay, spot_momentum=spot_momentum, opening_range=opening_range)
+                                        if fired_event:
+                                            runtime.append_event(fired_event.pop("event_type"), fired_event, run_id=run_id)
 
                         toxicity_mm_entry_allowed = False
                         toxicity_mm_has_exposure = False

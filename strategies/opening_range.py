@@ -58,6 +58,17 @@ class OpeningRangeBreakout:
         if state["ticks"] >= self.tick_count:
             state["range_frozen"] = True
 
+    def is_fired(self, slot_id: str) -> bool:
+        state = self.opening_ranges.get(str(slot_id))
+        return bool(state and state.get("broken"))
+
+    def mark_fired(self, slot_id: str, outcome: str = "") -> None:
+        state = self.opening_ranges.get(str(slot_id))
+        if state is None:
+            return
+        state["broken"] = True
+        state["broken_direction"] = str(outcome or "")
+
     def generate_signal(self, market_id: str, primary_outcome: str,
                        price: float, orderbook: OrderBook,
                        volume: float, slot_id: str = "") -> Optional[Signal]:
@@ -90,8 +101,6 @@ class OpeningRangeBreakout:
         breakout_threshold = opening_range * self.breakout_pct
 
         if price > opening_high + breakout_threshold:
-            state["broken"] = True
-            state["broken_direction"] = "up"
             # BUY the primary outcome (e.g., "Up")
             best_ask = orderbook.yes_asks[0][0] if orderbook.yes_asks else price
             return Signal(
@@ -105,8 +114,6 @@ class OpeningRangeBreakout:
                 book_quality=quality.to_dict(),
             )
         elif price < opening_low - breakout_threshold:
-            state["broken"] = True
-            state["broken_direction"] = "down"
             # BUY the opposite outcome
             opposite = orderbook.outcome_labels[1] if primary_outcome == orderbook.outcome_labels[0] else orderbook.outcome_labels[0]
             best_ask = orderbook.no_asks[0][0] if orderbook.no_asks else price

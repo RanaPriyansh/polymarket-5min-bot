@@ -25,6 +25,13 @@ from exposure import build_exposure_snapshot
 logger = logging.getLogger(__name__)
 
 OPEN_LIKE_CANCELLABLE_STATUSES = {"open", "partially_filled", "acknowledged"}
+DIRECTIONAL_SIGNAL_FAMILIES = {"mean_reversion_5min", "opening_range", "time_decay", "spot_momentum"}
+DEFAULT_DIRECTIONAL_ORDER_TTLS = {
+    "time_decay": 3.0,
+    "spot_momentum": 5.0,
+    "opening_range": 10.0,
+    "mean_reversion_5min": 10.0,
+}
 
 
 @dataclass
@@ -120,6 +127,12 @@ class PolymarketExecutor:
         self.paper_bankroll = float(execution_cfg.get("paper_starting_bankroll", 500.0))
         self.resolution_initial_poll_seconds = int(execution_cfg.get("resolution_initial_poll_seconds", 10))
         self.resolution_poll_cap_seconds = int(execution_cfg.get("resolution_poll_cap_seconds", 300))
+        ttl_cfg = execution_cfg.get("directional_order_ttl_seconds", {}) or {}
+        self.directional_order_ttl_enabled = bool(execution_cfg.get("directional_order_ttl_enabled", True))
+        self.directional_order_ttls = {
+            family: float(ttl_cfg.get(family, default))
+            for family, default in DEFAULT_DIRECTIONAL_ORDER_TTLS.items()
+        }
         fill_policy_cfg = execution_cfg.get("fill_policy", {})
         self.fill_engine = ConservativeFillEngine(
             FillPolicy(
@@ -623,6 +636,62 @@ class PolymarketExecutor:
                 cancelled_count += 1
         return cancelled_count
 
+    def _directional_order_ttl(self, strategy_family: str) -> float | None:
+        if not self.directional_order_ttl_enabled:
+            return None
+        ttl = self.directional_order_ttls.get(str(strategy_family))
+        if ttl is None or ttl <= 0:
+            return None
+        return float(ttl)
+
+    async def expire_directional_signal_orders(self, *, market_id: str | None = None, now_ts: float | None = None) -> List[Dict]:
+        """Cancel unfilled resting directional signal orders whose TTL elapsed.
+
+        This reuses normal cancel_order state transitions; returned dicts are runtime telemetry events.
+        Partially filled orders are intentionally preserved because they already created exposure.
+        """
+        now = float(now_ts if now_ts is not None else time.time())
+        events: List[Dict] = []
+        candidates = list(self.orders.items())
+        for order_id, order in candidates:
+            if market_id is not None and order.get("market_id") != market_id:
+                continue
+            if order.get("order_kind") != "signal":
+                continue
+            family = str(order.get("strategy_family") or "unknown")
+            if family not in DIRECTIONAL_SIGNAL_FAMILIES:
+                continue
+            if order.get("status") not in {"open", "acknowledged"}:
+                continue
+            if float(order.get("filled_qty", 0.0) or 0.0) > 1e-9:
+                continue
+            ttl = self._directional_order_ttl(family)
+            if ttl is None:
+                continue
+            created_ts = float(order.get("created_ts", order.get("timestamp", now)) or now)
+            age_seconds = now - created_ts
+            if age_seconds < ttl:
+                continue
+            if not await self.cancel_order(order_id):
+                continue
+            payload = {
+                "order_id": order_id,
+                "slot_id": order.get("slot_id"),
+                "market_id": order.get("market_id"),
+                "market_slug": order.get("market_slug"),
+                "strategy_family": family,
+                "outcome": order.get("outcome"),
+                "side": order.get("side"),
+                "created_ts": created_ts,
+                "expired_ts": now,
+                "age_seconds": round(age_seconds, 6),
+                "ttl_seconds": ttl,
+                "reason": "directional_order_ttl_expired_unfilled",
+            }
+            events.append({"event_type": "signal.order_expired", **payload})
+            events.append({"event_type": "signal.retry_allowed", **payload})
+        return events
+
     async def cancel_market_orders(self, market_id: str) -> int:
         to_cancel = [
             oid
@@ -707,6 +776,7 @@ class PolymarketExecutor:
             "strategy_family": order["strategy_family"],
             "market_id": order["market_id"],
             "market_slug": order.get("market_slug"),
+            "order_kind": order.get("order_kind", "unknown"),
             "slot_id": order.get("slot_id"),
             "outcome": order["outcome"],
             "side": order["side"],
@@ -854,6 +924,11 @@ class PolymarketExecutor:
             events.extend(await self.close_signal_slot(slot_id, orderbook, reason="signal_reversal"))
 
         existing_orders = self._open_signal_orders(slot_id, strategy_family)
+        if existing_orders:
+            expired_events = await self.expire_directional_signal_orders(market_id=market["id"], now_ts=float(orderbook.timestamp))
+            if expired_events:
+                events.extend(expired_events)
+                existing_orders = self._open_signal_orders(slot_id, strategy_family)
         if existing_orders:
             same_direction_order = next(
                 (

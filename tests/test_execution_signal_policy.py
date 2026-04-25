@@ -2,9 +2,10 @@ import time
 import unittest
 from types import SimpleNamespace
 
-from cli import _strategy_directional_signal_entry_style
+from cli import _filled_event_from_execution_result, _mark_directional_fired_on_fill, _strategy_directional_signal_entry_style
 from execution import PolymarketExecutor, resolve_signal_fill_behavior
 from market_data import OrderBook
+from strategies.opening_range import OpeningRangeBreakout
 
 
 class FakeMarketData:
@@ -27,7 +28,15 @@ class ExecutionSignalPolicyTests(unittest.IsolatedAsyncioTestCase):
                 "wallet_address": "paper-wallet",
                 "private_key": "paper-key",
             },
-            "execution": {},
+            "execution": {
+                "directional_order_ttl_enabled": True,
+                "directional_order_ttl_seconds": {
+                    "time_decay": 3,
+                    "spot_momentum": 5,
+                    "opening_range": 10,
+                    "mean_reversion_5min": 10,
+                },
+            },
             "strategies": {},
         }
         if global_style is not None:
@@ -208,6 +217,188 @@ class ExecutionSignalPolicyTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertFalse(second["opened"])
             self.assertEqual(second["reason"], "existing_open_order_same_direction")
+        finally:
+            await executor.__aexit__(None, None, None)
+
+    async def test_expired_directional_order_is_cancelled_and_retry_allowed(self):
+        executor = PolymarketExecutor(
+            self._config(strategy_styles={"opening_range": "resting_limit"}),
+            FakeMarketData(),
+            mode="paper",
+        )
+        await executor.__aenter__()
+        try:
+            first = await executor.execute_signal_trade(
+                self._market(),
+                self._book(ts=100.0),
+                self._signal(price=0.60),
+                strategy_family="opening_range",
+            )
+            order_id = first["order_id"]
+            executor.orders[order_id]["timestamp"] = 100.0
+            events = await executor.expire_directional_signal_orders(market_id="m1", now_ts=111.0)
+            self.assertEqual(executor.orders[order_id]["status"], "cancelled")
+            self.assertIn("signal.order_expired", [event["event_type"] for event in events])
+            self.assertIn("signal.retry_allowed", [event["event_type"] for event in events])
+
+            retry = await executor.execute_signal_trade(
+                self._market(),
+                self._book(ts=112.0),
+                self._signal(price=0.60),
+                strategy_family="opening_range",
+            )
+            self.assertTrue(retry["opened"])
+            self.assertNotEqual(retry["order_id"], order_id)
+        finally:
+            await executor.__aexit__(None, None, None)
+
+    async def test_immediate_fill_consumes_signal_using_order_filled_payload(self):
+        executor = PolymarketExecutor(
+            self._config(strategy_styles={"time_decay": "marketable"}),
+            FakeMarketData(),
+            mode="paper",
+        )
+        await executor.__aenter__()
+        try:
+            result = await executor.execute_signal_trade(
+                self._market(),
+                self._book(yes_ask=0.61, ts=100.0),
+                self._signal(price=0.61),
+                strategy_family="time_decay",
+            )
+            fired_fill = _filled_event_from_execution_result(result)
+            self.assertIsNotNone(fired_fill)
+            marker = SimpleNamespace(_fired_slots=set())
+
+            def mark_fired(slot_id, outcome):
+                marker._fired_slots.add((slot_id, outcome))
+
+            marker.mark_fired = mark_fired
+            event = _mark_directional_fired_on_fill(fired_fill, time_decay=marker)
+
+            self.assertIsNotNone(event)
+            self.assertEqual(event["event_type"], "signal.fired_on_fill")
+            self.assertIn(("btc:5:100", "Up"), marker._fired_slots)
+        finally:
+            await executor.__aexit__(None, None, None)
+
+    def test_close_fill_payload_does_not_fire_signal_state(self):
+        result = {
+            "events": [
+                {
+                    "event_type": "order.filled",
+                    "order_kind": "signal_close",
+                    "strategy_family": "time_decay",
+                    "slot_id": "btc:5:100",
+                    "outcome": "Up",
+                }
+            ]
+        }
+        self.assertIsNone(_filled_event_from_execution_result(result))
+        marker = SimpleNamespace(_fired_slots=set(), mark_fired=lambda slot_id, outcome: marker._fired_slots.add((slot_id, outcome)))
+        self.assertIsNone(_mark_directional_fired_on_fill(result["events"][0], time_decay=marker))
+        self.assertEqual(marker._fired_slots, set())
+
+    def test_opening_range_retries_until_fill_then_consumes_slot(self):
+        cfg = self._config(strategy_styles={"opening_range": "resting_limit"})
+        cfg["strategies"]["opening_range"].update({
+            "opening_range_ticks": 2,
+            "breakout_pct": 0.01,
+            "min_volume": 0,
+        })
+        strategy = OpeningRangeBreakout(cfg)
+        slot_id = "btc:5:100"
+        market_id = "m1"
+        book = self._book(yes_ask=0.61)
+        strategy.update_price(market_id, 0.50, volume=1000)
+        strategy.update_price(market_id, 0.51, volume=1000)
+
+        first = strategy.generate_signal(market_id, "Up", 0.52, book, volume=1000, slot_id=slot_id)
+        second = strategy.generate_signal(market_id, "Up", 0.52, book, volume=1000, slot_id=slot_id)
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertFalse(strategy.is_fired(market_id))
+
+        event = _mark_directional_fired_on_fill(
+            {
+                "strategy_family": "opening_range",
+                "slot_id": slot_id,
+                "market_id": "m1",
+                "market_slug": "btc-updown-5m-100",
+                "outcome": "Up",
+                "order_id": "o1",
+                "order_kind": "signal",
+            },
+            opening_range=strategy,
+        )
+        self.assertIsNotNone(event)
+        self.assertTrue(strategy.is_fired(market_id))
+        self.assertIsNone(strategy.generate_signal(market_id, "Up", 0.52, book, volume=1000, slot_id=slot_id))
+
+    async def test_unfilled_order_does_not_consume_strategy_fired_state_until_fill(self):
+        class FakeTimeDecay:
+            def __init__(self):
+                self.calls = []
+                self._fired_slots = set()
+
+            def mark_fired(self, slot_id, outcome):
+                self.calls.append((slot_id, outcome))
+                self._fired_slots.add((slot_id, outcome))
+
+        marker = FakeTimeDecay()
+        executor = PolymarketExecutor(
+            self._config(strategy_styles={"time_decay": "resting_limit"}),
+            FakeMarketData(),
+            mode="paper",
+        )
+        await executor.__aenter__()
+        try:
+            result = await executor.execute_signal_trade(
+                self._market(),
+                self._book(yes_bid=0.58, yes_ask=0.61, ts=100.0),
+                self._signal(price=0.59),
+                strategy_family="time_decay",
+            )
+            self.assertTrue(result["opened"])
+            self.assertFalse(result["filled"])
+            self.assertIsNone(_mark_directional_fired_on_fill(result, time_decay=marker))
+            self.assertEqual(marker.calls, [])
+
+            executor.orders[result["order_id"]]["timestamp"] = 100.0
+            fills = executor.evaluate_market_orders("m1", self._book(yes_bid=0.58, yes_ask=0.59, ts=102.0))
+            self.assertEqual(len(fills), 1)
+            event = _mark_directional_fired_on_fill(fills[0], time_decay=marker)
+            self.assertIsNotNone(event)
+            self.assertEqual(event["event_type"], "signal.fired_on_fill")
+            self.assertEqual(marker.calls, [("btc:5:100", "Up")])
+            event2 = _mark_directional_fired_on_fill(fills[0], time_decay=marker)
+            self.assertIsNone(event2)
+            self.assertEqual(marker.calls, [("btc:5:100", "Up")])
+        finally:
+            await executor.__aexit__(None, None, None)
+
+    async def test_ttl_does_not_cancel_partially_filled_or_quote_orders(self):
+        executor = PolymarketExecutor(
+            self._config(strategy_styles={"opening_range": "resting_limit"}),
+            FakeMarketData(),
+            mode="paper",
+        )
+        await executor.__aenter__()
+        try:
+            signal_order = await executor.place_order(
+                "m1", "Up", "BUY", 2.0, 0.60, strategy_family="opening_range", order_kind="signal", market=self._market()
+            )
+            executor.orders[signal_order]["timestamp"] = 100.0
+            executor.orders[signal_order]["status"] = "partially_filled"
+            executor.orders[signal_order]["filled_qty"] = 0.5
+            quote_order = await executor.place_order(
+                "m1", "Up", "BUY", 2.0, 0.60, strategy_family="toxicity_mm", order_kind="quote", market=self._market()
+            )
+            executor.orders[quote_order]["timestamp"] = 100.0
+            events = await executor.expire_directional_signal_orders(market_id="m1", now_ts=200.0)
+            self.assertEqual(events, [])
+            self.assertEqual(executor.orders[signal_order]["status"], "partially_filled")
+            self.assertEqual(executor.orders[quote_order]["status"], "open")
         finally:
             await executor.__aexit__(None, None, None)
 

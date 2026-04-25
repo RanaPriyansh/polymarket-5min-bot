@@ -30,6 +30,12 @@ execution:
   quote_refresh_seconds: 5
   resolution_initial_poll_seconds: 10
   resolution_poll_cap_seconds: 300
+  directional_order_ttl_enabled: true
+  directional_order_ttl_seconds:
+    time_decay: 3
+    spot_momentum: 5
+    opening_range: 10
+    mean_reversion_5min: 10
 strategies:
   # toxicity_mm remains the baseline maker; time_decay is active with
   # tightly bounded endgame sizing so runtime/autoresearch can attribute PnL.
