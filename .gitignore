@@ -3,8 +3,11 @@ __pycache__/
 data/runtime/
 data/runtime-smoke*/
 data/runtime-*-smoke/
+data/runtime-snapshot-*/
+data/runtime-backup-*/
 data/research/
 data/research-*-smoke/
+data/strategy-gate*/
 data/collection_*.csv
 data/sample_backtest.csv
 data/experiments/*
@@ -17,5 +20,4 @@ deploy/systemd/*.bak
 *.sqlite3
 *.sqlite
 data/forensic-snapshots/
-data/runtime-backup-*/
 *.jsonl

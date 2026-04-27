@@ -75,6 +75,14 @@ class RuntimeTelemetry:
     def update_status(self, **fields) -> Dict:
         current = self.read_json(self.status_path) or {}
         current.update(fields)
+
+        phase = str(current.get("phase") or "").strip().lower()
+        if "stop_reason" in fields:
+            if fields.get("stop_reason") is None:
+                current.pop("stop_reason", None)
+        elif phase in {"starting", "running"}:
+            current.pop("stop_reason", None)
+
         if not isinstance(fields.get("market_eligibility"), dict):
             resolved_run_id = str(current.get("run_id")) if current.get("run_id") else None
             discovered_markets = current.get("fetched_markets")

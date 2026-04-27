@@ -159,17 +159,19 @@ def has_unreviewed_circuit_breaker(runtime_dir: str) -> bool:
     import json
     from pathlib import Path
 
-    snapshots_dir = Path(runtime_dir) / "forensic-snapshots"
-    if not snapshots_dir.exists():
-        return False
-    for manifest_path in snapshots_dir.glob("*/manifest.json"):
-        try:
-            with open(manifest_path) as f:
-                manifest = json.load(f)
-            if manifest.get("trigger") == "circuit_breaker" and "reviewed_ts" not in manifest:
-                return True
-        except Exception:
+    runtime_path = Path(runtime_dir)
+    snapshot_roots = [runtime_path.parent / "forensic-snapshots", runtime_path / "forensic-snapshots"]
+    for snapshots_dir in snapshot_roots:
+        if not snapshots_dir.exists():
             continue
+        for manifest_path in snapshots_dir.glob("*/manifest.json"):
+            try:
+                with open(manifest_path) as f:
+                    manifest = json.load(f)
+                if manifest.get("trigger") == "circuit_breaker" and "reviewed_ts" not in manifest:
+                    return True
+            except Exception:
+                continue
     return False
 
 

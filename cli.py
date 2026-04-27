@@ -45,6 +45,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent
 CLI_SCRIPT_PATH = PROJECT_ROOT / "cli.py"
+CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+
+
+def _project_path(path_value: str) -> Path:
+    path = Path(path_value)
+    return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 @click.group()
@@ -58,15 +64,15 @@ def _load_dotenv() -> None:
         from dotenv import load_dotenv  # type: ignore
     except ImportError:
         return
-    load_dotenv()
+    load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
 
 
 def _ensure_runtime_dirs(cfg: dict) -> None:
-    Path("data").mkdir(exist_ok=True)
-    Path("logs").mkdir(exist_ok=True)
-    runtime_dir = Path(cfg.get("runtime", {}).get("dir", "data/runtime"))
+    (PROJECT_ROOT / "data").mkdir(exist_ok=True)
+    (PROJECT_ROOT / "logs").mkdir(exist_ok=True)
+    runtime_dir = _project_path(cfg.get("runtime", {}).get("dir", "data/runtime"))
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    log_file = Path(cfg.get("logging", {}).get("file", "logs/bot.log"))
+    log_file = _project_path(cfg.get("logging", {}).get("file", "logs/bot.log"))
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -91,7 +97,7 @@ def _apply_env_overrides(cfg: dict) -> dict:
 
 def load_cfg() -> dict:
     _load_dotenv()
-    with open("config.yaml", "r", encoding="utf-8") as fh:
+    with CONFIG_PATH.open("r", encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh)
     cfg = _apply_env_overrides(cfg)
     _ensure_runtime_dirs(cfg)

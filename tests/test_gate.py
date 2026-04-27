@@ -11,9 +11,12 @@ import os
 # inside the tests/ directory or via pytest from the repo root.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import json
+import tempfile
+from pathlib import Path
 import unittest
 
-from research.gate import compute_gate_state
+from research.gate import build_gate_inputs, compute_gate_state
 
 
 def _base_inputs(**overrides) -> dict:
@@ -34,6 +37,26 @@ def _base_inputs(**overrides) -> dict:
 
 
 class GateTests(unittest.TestCase):
+
+    def test_build_gate_inputs_detects_unreviewed_circuit_breaker_in_sibling_forensic_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            runtime_dir = data_dir / "runtime"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / "status.json").write_text(
+                json.dumps({"win_rate": 0.55, "resolved_trade_count": 12}),
+                encoding="utf-8",
+            )
+            manifest_path = data_dir / "forensic-snapshots" / "20260427T152744Z" / "manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                json.dumps({"trigger": "circuit_breaker", "snapshot_ts": "2026-04-27T15:27:44Z"}),
+                encoding="utf-8",
+            )
+
+            inputs = build_gate_inputs(str(runtime_dir))
+
+            self.assertTrue(inputs["circuit_breaker_fired_unreviewed"])
 
     # ------------------------------------------------------------------
     # RED tests

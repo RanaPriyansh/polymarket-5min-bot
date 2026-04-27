@@ -219,6 +219,34 @@ class RuntimeFeatureTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Pause policy: family-aware | Scope: mixed_by_family | Reason: mixed_by_family", rendered)
             self.assertIn("Family-aware pause detail: opening_range=paused (directional_low_win_rate_red_gate); toxicity_mm=active (mm_exempt_low_win_rate_only)", rendered)
 
+    async def test_runtime_telemetry_clears_stale_stop_reason_on_active_run_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            telemetry = RuntimeTelemetry(tmpdir)
+            telemetry.update_status(run_id="paper-old", phase="stopped", mode="paper", stop_reason="circuit_breaker")
+
+            starting_status = telemetry.update_status(run_id="paper-new", phase="starting", mode="paper")
+            self.assertNotIn("stop_reason", starting_status)
+
+            running_status = telemetry.update_status(run_id="paper-new", phase="running", mode="paper", loop_count=1)
+            self.assertNotIn("stop_reason", running_status)
+            self.assertNotIn("stop_reason", telemetry.read_status())
+
+    async def test_runtime_telemetry_preserves_stop_reason_for_stopping_and_stopped_snapshots(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            telemetry = RuntimeTelemetry(tmpdir)
+
+            stopping_status = telemetry.update_status(
+                run_id="paper-stop",
+                phase="stopping",
+                mode="paper",
+                stop_reason="circuit_breaker",
+            )
+            self.assertEqual(stopping_status["stop_reason"], "circuit_breaker")
+
+            stopped_status = telemetry.update_status(run_id="paper-stop", phase="stopped", mode="paper")
+            self.assertEqual(stopped_status["stop_reason"], "circuit_breaker")
+            self.assertEqual(telemetry.read_status()["stop_reason"], "circuit_breaker")
+
     async def test_runtime_telemetry_treats_empty_status_file_as_empty_dict(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_dir = Path(tmpdir)
