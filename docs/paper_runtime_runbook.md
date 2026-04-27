@@ -164,10 +164,16 @@ cd /root/obsidian-hermes-vault/projects/polymarket-5min-bot
 .venv/bin/python cli.py status --runtime-dir data/runtime
 ```
 
-Health check
+Health check (manual heartbeat-only view)
 ```bash
 cd /root/obsidian-hermes-vault/projects/polymarket-5min-bot
 .venv/bin/python cli.py health --runtime-dir data/runtime --max-heartbeat-age 180
+```
+
+Safe auto-heal path actually used by systemd
+```bash
+cd /root/obsidian-hermes-vault/projects/polymarket-5min-bot
+.venv/bin/python scripts/paper_healthcheck.py --runtime-dir data/runtime --max-heartbeat-age 180
 ```
 
 Raw latest status
