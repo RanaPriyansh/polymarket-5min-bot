@@ -14,7 +14,9 @@ from paper_health_policy import evaluate_healthcheck_restart_policy
 from status_utils import render_status_text, runtime_health_payload
 
 
-DEFAULT_RESTART_COMMAND = ["systemctl", "restart", "polymarket-paper-bot.service"]
+# Safety invariant: healthchecks are observability/alerting only.
+# They must NEVER start/restart polymarket-paper-bot.service, because that can
+# erase circuit-breaker/drawdown semantics and contaminate paper-run evidence.
 
 
 def _paper_process_entries() -> list[tuple[int, str]]:
@@ -61,9 +63,15 @@ def service_main_pid() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Safe paper bot healthcheck with protective-stop guard.")
+    parser = argparse.ArgumentParser(description="Alert-only paper bot healthcheck with protective-stop guard.")
     parser.add_argument("--runtime-dir", default="data/runtime")
     parser.add_argument("--max-heartbeat-age", type=int, default=180)
+    parser.add_argument(
+        "--no-restart",
+        action="store_true",
+        default=True,
+        help="Compatibility flag; restarts are permanently disabled by policy.",
+    )
     args = parser.parse_args()
 
     payload = runtime_health_payload(args.runtime_dir, max_heartbeat_age=args.max_heartbeat_age)
@@ -96,15 +104,10 @@ def main() -> int:
     if not decision["should_restart"]:
         return 0
 
-    print("Auto-heal action: restarting polymarket-paper-bot.service")
-    restart = subprocess.run(DEFAULT_RESTART_COMMAND, check=False, capture_output=True, text=True)
-    if restart.stdout.strip():
-        print(restart.stdout.strip())
-    if restart.stderr.strip():
-        print(restart.stderr.strip(), file=sys.stderr)
-    if restart.returncode != 0:
-        print(f"Auto-heal restart failed with exit code {restart.returncode}", file=sys.stderr)
-        return restart.returncode
+    print(
+        "Auto-heal action suppressed: healthchecks are alert-only; "
+        "manual human-approved clean restart required."
+    )
     return 0
 
 

@@ -77,6 +77,24 @@ class RiskSizingPolicyTests(unittest.TestCase):
         )
         self.assertGreater(high.size, low.size)
 
+    def test_explicit_runtime_risk_stop_markers_are_classified(self):
+        self.assertEqual(
+            self.rm.circuit_breaker_reason({"capital": 500.0, "peak": 500.0, "stop_reason": "circuit_breaker"}),
+            "circuit_breaker",
+        )
+        self.assertEqual(
+            self.rm.circuit_breaker_reason({"capital": 500.0, "peak": 500.0, "max_risk_stop": True}),
+            "max_risk_stop",
+        )
+        self.assertEqual(
+            self.rm.circuit_breaker_reason({"capital": 500.0, "peak": 500.0, "stop_reason": "max_risk_stop"}),
+            "max_risk_stop",
+        )
+        self.assertEqual(
+            self.rm.circuit_breaker_reason({"capital": 500.0, "peak": 500.0, "circuit_breaker": True}),
+            "circuit_breaker",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

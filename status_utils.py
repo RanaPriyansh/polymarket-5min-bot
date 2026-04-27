@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from runtime_telemetry import RuntimeTelemetry
+from risk_latch import risk_latch_summary
 
 
 def _render_slot_resolution_line(latest_slot_resolution: dict[str, Any] | None) -> str:
@@ -68,6 +69,16 @@ def runtime_status_payload(runtime_dir: str | Path) -> dict[str, Any]:
         market_eligibility = telemetry.summarize_market_eligibility(
             run_id=str(status.get("run_id")) if status.get("run_id") else None,
         )
+    latch_summary = risk_latch_summary(
+        runtime_dir,
+        current_run_id=str(status.get("run_id")) if status.get("run_id") else None,
+    )
+    status = {
+        **status,
+        "risk_latch_present": latch_summary["risk_latch_present"],
+        "risk_latch_reason": latch_summary["risk_latch_reason"],
+        "revived_after_risk_stop": latch_summary["revived_after_risk_stop"],
+    }
     return {
         "runtime_dir": str(Path(runtime_dir)),
         "status": status,
@@ -75,6 +86,7 @@ def runtime_status_payload(runtime_dir: str | Path) -> dict[str, Any]:
         "heartbeat_age_seconds": heartbeat_age,
         "recent_events": telemetry.read_events(limit=10),
         "market_eligibility": market_eligibility,
+        **latch_summary,
     }
 
 
@@ -178,6 +190,7 @@ def render_status_text(runtime_dir: str | Path) -> str:
         f"Run id: {status.get('run_id', 'unknown')}",
         f"Phase: {status.get('phase', 'unknown')} | Mode: {status.get('mode', 'unknown')} | Loop: {status.get('loop_count', 0)}",
         f"Heartbeat age: {heartbeat_text}",
+        f"Risk latch: present={bool(payload.get('risk_latch_present', False))} reason={payload.get('risk_latch_reason') or 'n/a'} revived_after_risk_stop={bool(payload.get('revived_after_risk_stop', False))}",
         f"Markets: fetched={status.get('fetched_markets', 0)} processed={status.get('processed_markets', 0)} toxic_skips={status.get('toxic_skips', 0)}",
         (
             "Market eligibility ({scope}-scoped): discovered={discovered} structural={structural} governance={governance} quoted/entered={quoted}"

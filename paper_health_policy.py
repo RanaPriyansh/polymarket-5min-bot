@@ -8,6 +8,7 @@ _PROTECTIVE_STOP_REASONS = {
     "completed",
     "keyboard_interrupt",
     "max_loops",
+    "risk_stop_latch_present",
 }
 _PROTECTIVE_STOP_PREFIXES = ("signal_",)
 _PROTECTIVE_STOP_SUBSTRINGS = (
@@ -26,7 +27,7 @@ _PROTECTIVE_GATE_MARKERS = (
     "daily loss",
     "drawdown",
 )
-_PROTECTIVE_PAUSE_REASONS = {"hard_stop_red_gate"}
+_PROTECTIVE_PAUSE_REASONS = {"hard_stop_red_gate", "persistent_risk_stop_latch"}
 
 
 def _text(value: Any) -> str:
@@ -65,8 +66,16 @@ def is_protective_stop(status: Mapping[str, Any] | None) -> tuple[bool, list[str
             reasons.append(f"gate_reason={gate_reason}")
 
     pause_reason = _lower(snapshot.get("pause_reason"))
-    if pause_reason in _PROTECTIVE_PAUSE_REASONS:
+    if pause_reason in _PROTECTIVE_PAUSE_REASONS or "risk_stop_latch" in pause_reason:
         reasons.append(f"pause_reason={pause_reason}")
+
+    pause_policy = _lower(snapshot.get("pause_policy"))
+    if "risk_stop_latch" in pause_policy or pause_policy in _PROTECTIVE_PAUSE_REASONS:
+        reasons.append(f"pause_policy={pause_policy}")
+
+    if bool(snapshot.get("risk_latch_present")):
+        latch_reason = _lower(snapshot.get("risk_latch_reason")) or "present"
+        reasons.append(f"risk_latch_present={latch_reason}")
 
     deduped = sorted(dict.fromkeys(reasons))
     return bool(deduped), deduped

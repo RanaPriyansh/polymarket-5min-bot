@@ -108,22 +108,35 @@ class RiskManager:
             ),
         )
 
-    def check_circuit_breakers(self, risk_report: Optional[Dict] = None) -> bool:
+    def circuit_breaker_reason(self, risk_report: Optional[Dict] = None) -> str | None:
         report = risk_report or self.get_risk_report()
         capital = float(report.get("capital", self.initial_capital))
         peak = float(report.get("peak", max(self.initial_capital, capital)))
         daily_pnl = float(report.get("daily_pnl", 0.0))
         dd = float(report.get("max_drawdown", 0.0))
+        explicit_stop_reason = str(report.get("stop_reason") or "")
+        if explicit_stop_reason in {"circuit_breaker", "daily_loss_limit", "drawdown_limit", "max_risk_stop"}:
+            logger.warning("Explicit risk stop reason present: %s", explicit_stop_reason)
+            return explicit_stop_reason
+        if bool(report.get("max_risk_stop")):
+            logger.warning("Max risk stop marker present in risk report")
+            return "max_risk_stop"
+        if bool(report.get("circuit_breaker")):
+            logger.warning("Circuit breaker marker present in risk report")
+            return "circuit_breaker"
         if peak > 0 and dd <= 0:
             dd = max(0.0, (peak - capital) / peak)
 
         if daily_pnl < 0 and abs(daily_pnl) / self.initial_capital > self.config.get("max_daily_loss", 0.05):
             logger.warning("Daily loss limit hit: %.2f", daily_pnl)
-            return True
+            return "daily_loss_limit"
         if dd > self.config.get("circuit_breaker_dd", 0.1):
             logger.warning("Drawdown limit hit: %.2f%%", dd * 100)
-            return True
-        return False
+            return "drawdown_limit"
+        return None
+
+    def check_circuit_breakers(self, risk_report: Optional[Dict] = None) -> bool:
+        return self.circuit_breaker_reason(risk_report) is not None
 
     def update_capital(self, pnl: float):
         self.current_capital += pnl

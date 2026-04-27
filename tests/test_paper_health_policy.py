@@ -101,6 +101,30 @@ class PaperHealthPolicyTests(unittest.TestCase):
         self.assertIn("stop_reason=max_loops", reasons)
 
 
+    def test_latched_runtime_counts_as_protective_stop(self):
+        payload = {
+            "healthy": False,
+            "status": {
+                "mode": "paper",
+                "phase": "paused",
+                "stop_reason": "risk_stop_latch_present",
+                "pause_policy": "persistent_risk_stop_latch",
+                "pause_reason": "risk_stop_latch_present:drawdown_limit",
+                "risk_latch_present": True,
+                "risk_latch_reason": "drawdown_limit",
+                "gate_state": "RED",
+                "gate_reasons": ["risk_stop_latch:drawdown_limit"],
+            },
+        }
+
+        decision = evaluate_healthcheck_restart_policy(payload, paper_process_count=0)
+
+        self.assertFalse(decision["should_restart"])
+        self.assertEqual(decision["reason"], "protective_stop")
+        self.assertIn("stop_reason=risk_stop_latch_present", decision["protective_stop_reasons"])
+        self.assertIn("risk_latch_present=drawdown_limit", decision["protective_stop_reasons"])
+
+
 class CliLiveBlockTests(unittest.TestCase):
     def test_live_mode_remains_blocked_via_cli(self):
         runner = CliRunner()

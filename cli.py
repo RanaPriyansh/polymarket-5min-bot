@@ -23,11 +23,13 @@ import yaml
 
 from baseline_evidence import build_baseline_evidence, render_baseline_evidence_text
 from execution import resolve_directional_signal_entry_style
+from notification_governor import NotificationGovernor, build_readable_digest
 from research.gate import build_gate_inputs, compute_gate_state
 from research.loop import ResearchLoop
 from research.polymarket import PolymarketRuntimeResearchAdapter
 from runtime_telemetry import RuntimeTelemetry
-from status_utils import render_status_text, runtime_health_payload
+from risk_latch import apply_startup_risk_latch, manual_reset_risk_latch, persist_runtime_risk_stop
+from status_utils import render_status_text, runtime_health_payload, runtime_status_payload
 from strategy_bakeoff import (
     build_trial_command,
     build_trial_runtime_dir,
@@ -36,6 +38,7 @@ from strategy_bakeoff import (
     rank_trials,
     write_bakeoff_artifacts,
 )
+from telegram_alerts import TelegramNotifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -102,6 +105,18 @@ def load_cfg() -> dict:
     cfg = _apply_env_overrides(cfg)
     _ensure_runtime_dirs(cfg)
     return cfg
+
+
+def send_digest_notification(cfg: dict, text: str) -> bool:
+    notifier = TelegramNotifier(cfg)
+    try:
+        return bool(asyncio.run(notifier._send(text, parse_mode=None)))
+    finally:
+        try:
+            asyncio.run(notifier.close())
+        except RuntimeError:
+            pass
+
 
 
 def _emit_events(runtime: RuntimeTelemetry, events: Iterable[Dict], *, run_id: str | None = None) -> None:
@@ -274,6 +289,10 @@ def _runtime_gate_snapshot(runtime_dir: str | Path) -> Dict[str, object]:
 _MM_EXEMPT_FAMILIES = {"toxicity_mm", "market_making"}
 _HARD_STOP_REASON_MARKERS = (
     "circuit_breaker",
+    "daily_loss",
+    "drawdown_limit",
+    "max_risk",
+    "risk_stop_latch",
     "contradiction_log_open",
     "run_lineage_fragmentation",
 )
@@ -959,6 +978,10 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
 
         runtime.append_event("runtime.started", {"run_id": run_id, "mode": mode, "strategies": active_strategies, **strategy_governance})
         runtime.update_status(run_id=run_id, phase="starting", mode=mode, strategies=active_strategies, loop_count=0, **strategy_governance)
+        if apply_startup_risk_latch(runtime, run_id=run_id, mode=mode, strategies=active_strategies):
+            click.echo("Persistent risk-stop latch present — new orders paused; manual reset required.")
+            _stop_context["reason"] = "risk_stop_latch_present"
+            return
 
         async with PolymarketData(cfg) as md:
             startup = await md.smoke_check()
@@ -1415,17 +1438,20 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                         )
                     )
 
-                    if risk_mgr.check_circuit_breakers(risk_report):
-                        stop_reason = "circuit_breaker"
-                        runtime.append_event("runtime.circuit_breaker", {"run_id": run_id, "risk": risk_report})
-                        runtime.update_status(
+                    risk_stop_reason = risk_mgr.circuit_breaker_reason(risk_report)
+                    if risk_stop_reason:
+                        stop_reason = risk_stop_reason
+                        persist_runtime_risk_stop(
+                            runtime,
+                            runtime_dir,
                             run_id=run_id,
-                            phase="stopping",
                             mode=mode,
                             loop_count=loop_count,
                             stop_reason=stop_reason,
-                            risk=risk_report,
+                            risk_report=risk_report,
+                            gate_snapshot=gate_snapshot,
                         )
+                        runtime.append_event("runtime.circuit_breaker", {"run_id": run_id, "risk": risk_report})
                         evidence_manifest = runtime.preserve_run_evidence(trigger=stop_reason, run_id=run_id)
                         stop_snapshot_dir = str(evidence_manifest["snapshot_dir"])
                         runtime.append_event(
@@ -1433,7 +1459,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
                             {"run_id": run_id, "trigger": stop_reason, "snapshot_dir": stop_snapshot_dir},
                         )
                         click.echo(f"Preserved stop evidence at {stop_snapshot_dir}")
-                        click.echo("CIRCUIT BREAKER TRIGGERED — stopping trading")
+                        click.echo(f"RISK STOP TRIGGERED ({stop_reason}) — stopping trading")
                         break
 
                     if max_loops and loop_count >= max_loops:
@@ -1463,9 +1489,8 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     _stop_context: dict = {"reason": "completed"}
     asyncio.run(main_loop())
 
-    # AC-2: circuit breaker must exit with code 2 so systemd RestartPreventExitStatus=2 suppresses restart
-    if _stop_context["reason"] == "circuit_breaker":
-        click.echo("Exiting with code 2 (circuit_breaker) — service will not auto-restart")
+    if _stop_context["reason"] in {"circuit_breaker", "daily_loss_limit", "drawdown_limit", "max_risk_stop", "risk_stop_latch_present"}:
+        click.echo(f"Exiting with code 2 ({_stop_context['reason']}) — service will not auto-restart")
         sys.exit(2)
 
 
@@ -1579,6 +1604,61 @@ def health_cmd(runtime_dir, max_heartbeat_age):
     click.echo(f"Healthy: {payload['healthy']} (threshold={max_heartbeat_age}s)")
     if not payload["healthy"]:
         raise SystemExit(1)
+
+
+@cli.command(name="reset-risk-latch")
+@click.option("--runtime-dir", default="data/runtime", help="Directory containing the risk-stop latch")
+@click.option("--reason", required=True, help="Human approval reason for archiving/resetting the latch")
+def reset_risk_latch_cmd(runtime_dir, reason):
+    """Archive the persistent risk-stop latch after explicit human approval."""
+    try:
+        archive_path = manual_reset_risk_latch(runtime_dir, reason=reason)
+    except FileNotFoundError as exc:
+        raise click.ClickException(f"No risk-stop latch found at {exc}") from exc
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Archived risk latch to {archive_path}")
+
+
+@cli.command()
+@click.option("--runtime-dir", default=None, help="Directory containing live runtime artifacts")
+@click.option("--dry-run/--no-dry-run", default=False, help="Render digest without sending")
+@click.option("--send", is_flag=True, default=False, help="Explicitly send the digest via Telegram")
+@click.option("--force", is_flag=True, default=False, help="Bypass digest interval suppression")
+def notify_digest(runtime_dir, dry_run, send, force):
+    """Render the readable notification digest and optionally send it."""
+    cfg = load_cfg()
+    resolved_runtime_dir = _project_path(str(runtime_dir or cfg.get("runtime", {}).get("dir", "data/runtime")))
+    governor = NotificationGovernor()
+    digest_text = build_readable_digest(resolved_runtime_dir, governor=governor)
+    click.echo(digest_text)
+
+    if dry_run:
+        click.echo("Dry run: digest rendered only; no send attempted.")
+        return
+    if not send:
+        click.echo("Send not requested; digest rendered only.")
+        return
+
+    runtime_mode = str((runtime_status_payload(resolved_runtime_dir).get("status") or {}).get("mode") or "unknown").strip().lower()
+    if governor.policy.paper_only and runtime_mode != "paper":
+        raise click.ClickException(
+            f"Refusing to send digest because PAPER_ONLY policy is enabled but runtime mode is {runtime_mode or 'unknown'}."
+        )
+
+    decision = governor.claim_digest_send(force=force)
+    if not decision.should_send:
+        click.echo(
+            f"Digest suppressed by governor: reason={decision.reason} next_allowed_at={decision.next_allowed_at}"
+        )
+        return
+
+    sent = send_digest_notification(cfg, digest_text)
+    if not sent:
+        governor.release_digest_claim()
+        raise click.ClickException("Digest send failed or Telegram is disabled.")
+    governor.confirm_digest_sent()
+    click.echo(f"Digest sent: reason={decision.reason}")
 
 
 @cli.command(name="evidence")
