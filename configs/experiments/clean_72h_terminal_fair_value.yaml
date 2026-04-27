@@ -1,0 +1,88 @@
+experiment:
+  id: clean_72h_terminal_fair_value
+  mode: paper
+  duration_hours: 72
+  live_blocked: true
+  healthcheck_restart: false
+  respect_risk_latch: true
+
+polymarket:
+  clob_api_version: v2
+  clob_environment: read_only
+  clob_api_url: https://clob.polymarket.com
+  clob_v2_read_only_url: https://clob-v2.polymarket.com
+  clob_urls:
+    production: https://clob.polymarket.com
+    staging: https://clob-v2.polymarket.com
+    read_only: https://clob-v2.polymarket.com
+  gamma_api_url: https://gamma-api.polymarket.com
+  assets: [btc, eth, sol, xrp]
+  intervals: [5]
+  fallback_windows: 1
+
+strategies:
+  active: []
+  states:
+    toxicity_mm: disabled
+    time_decay: disabled
+    mean_reversion_5min: candidate_only
+    opening_range: candidate_only
+    terminal_fair_value: scanner_only
+    lag_scanner: scanner_only
+    complement_dislocation: scanner_only
+    toxicity_mm_v2: scanner_only
+  candidates:
+    - terminal_fair_value
+    - lag_scanner
+    - complement_dislocation
+  promotion_requires_human_approval: true
+  allow_unapproved_activation: false
+  terminal_fair_value:
+    model: gbm
+    max_tte_seconds: 60
+    max_active_tte_seconds: 120
+    max_book_age_ms: 500
+    max_spot_age_ms: 300
+    max_spread: 0.06
+    min_scanner_edge: 0.05
+    min_taker_edge: 0.08
+    min_maker_edge: 0.04
+    annualized_vol: 0.8
+  lag_scanner:
+    min_fair_delta: 0.12
+    min_edge_after_latency: 0.05
+    latency_penalty: 0.02
+  complement_dislocation:
+    safety_margin: 0.01
+    fee_buffer: 0.0
+
+execution:
+  paper_starting_bankroll: 500
+  live_order_approval: false
+  fill_policy:
+    min_rest_seconds: 1.0
+    max_fill_fraction_per_snapshot: 0.25
+    allow_same_snapshot_fill: false
+    max_book_age_ms: 1000
+    max_external_spot_age_ms: 1000
+    max_ws_lag_ms: 1000
+    cancel_latency_ms: 250
+    taker_fee_bps: 0
+
+metrics:
+  - opportunity_count
+  - candidate_count
+  - hypothetical_ev
+  - simulated_fill_count
+  - settled_count
+  - pnl_per_trade
+  - markout_5s
+  - markout_15s
+  - markout_60s
+  - markout_300s
+  - markout_settlement
+  - adverse_selection_score
+  - queue_fill_confidence
+  - stale_book_rejection_count
+  - model_calibration_brier_score
+  - fair_vs_settlement_calibration

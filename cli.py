@@ -22,6 +22,7 @@ import click
 import yaml
 
 from baseline_evidence import build_baseline_evidence, render_baseline_evidence_text
+from evidence_mart import build_evidence_mart, build_evidence_rows, family_performance, markout_vs_settlement, tte_performance
 from execution import resolve_directional_signal_entry_style
 from notification_governor import NotificationGovernor, build_readable_digest
 from research.gate import build_gate_inputs, compute_gate_state
@@ -38,6 +39,7 @@ from strategy_bakeoff import (
     rank_trials,
     write_bakeoff_artifacts,
 )
+from strategy_state import validate_active_strategy_states
 from telegram_alerts import TelegramNotifier
 
 logging.basicConfig(
@@ -936,6 +938,12 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
 
     cfg = load_cfg()
     active_strategies = _resolve_active_strategies(cfg, strategies)
+    state_violations = validate_active_strategy_states(cfg, active_strategies)
+    if state_violations:
+        raise click.ClickException(
+            "Refusing to activate strategies without paper_active state and approval: "
+            + ", ".join(state_violations)
+        )
     cfg.setdefault("strategies", {})["active"] = active_strategies
     initial_capital = float(cfg.get("execution", {}).get("paper_starting_bankroll", 500.0))
     ledger_db_path = str(Path(runtime_dir) / "ledger.db")
@@ -1675,6 +1683,50 @@ def evidence_cmd(runtime_dir, strategy_family, event_limit, sample_limit):
         sample_limit=sample_limit,
     )
     click.echo(render_baseline_evidence_text(payload))
+
+
+@cli.command(name="build-evidence-mart")
+@click.option("--runtime-dir", default="data/runtime", help="Directory containing runtime artifacts")
+@click.option("--artifact-dir", default="data/research/evidence_mart", help="Directory for evidence mart outputs")
+@click.option("--run-id", default=None, help="Optional run id scope")
+def build_evidence_mart_cmd(runtime_dir, artifact_dir, run_id):
+    """Build canonical decision/fill/settlement evidence mart."""
+    payload = build_evidence_mart(runtime_dir, artifact_dir=artifact_dir, run_id=run_id)
+    click.echo(f"Evidence mart rows={payload['row_count']} gate={payload['gate']['state']}")
+    click.echo(f"Artifacts written to {artifact_dir}/latest.json and latest.md")
+
+
+@cli.command(name="analyze-family-performance")
+@click.option("--runtime-dir", default="data/runtime", help="Directory containing runtime artifacts")
+@click.option("--run-id", default=None, help="Optional run id scope")
+def analyze_family_performance_cmd(runtime_dir, run_id):
+    """Summarize settled PnL by strategy family."""
+    for row in family_performance(build_evidence_rows(runtime_dir, run_id=run_id)):
+        click.echo(
+            "{strategy_family}: rows={rows} settled={settled_count} pnl={settled_pnl:.6f} avg={avg_settled_pnl:.6f}".format(**row)
+        )
+
+
+@cli.command(name="analyze-tte-performance")
+@click.option("--runtime-dir", default="data/runtime", help="Directory containing runtime artifacts")
+@click.option("--run-id", default=None, help="Optional run id scope")
+def analyze_tte_performance_cmd(runtime_dir, run_id):
+    """Summarize settled PnL by time-to-expiry bucket."""
+    for row in tte_performance(build_evidence_rows(runtime_dir, run_id=run_id)):
+        click.echo("{bucket}: rows={rows} settled={settled_count} pnl={settled_pnl:.6f}".format(**row))
+
+
+@cli.command(name="analyze-markout-vs-settlement")
+@click.option("--runtime-dir", default="data/runtime", help="Directory containing runtime artifacts")
+@click.option("--run-id", default=None, help="Optional run id scope")
+def analyze_markout_vs_settlement_cmd(runtime_dir, run_id):
+    """Report positive short-horizon markouts that settled negative."""
+    payload = markout_vs_settlement(build_evidence_rows(runtime_dir, run_id=run_id))
+    click.echo(f"positive_60s_negative_settlement_count={payload['positive_60s_negative_settlement_count']}")
+    for example in payload["examples"][:10]:
+        click.echo(
+            "{strategy_family} slot={slot_id} order={order_id} markout_60s={markout_60s} settled_pnl={settled_pnl}".format(**example)
+        )
 
 
 @cli.command(name="bakeoff")

@@ -20,6 +20,8 @@ def _load_module(name: str, path: Path):
 
 class SupervisorNotificationWiringTests(unittest.TestCase):
     def setUp(self):
+        if not SUPERVISOR_PATH.exists():
+            self.skipTest(f"supervisor script not present: {SUPERVISOR_PATH}")
         self.module = _load_module("polymarket_72h_supervisor_test", SUPERVISOR_PATH)
 
     def _snapshot(self, **overrides):
@@ -99,6 +101,8 @@ class SupervisorNotificationWiringTests(unittest.TestCase):
 
 class DigestNotificationWiringTests(unittest.TestCase):
     def setUp(self):
+        if not DIGEST_PATH.exists():
+            self.skipTest(f"digest script not present: {DIGEST_PATH}")
         self.module = _load_module("polymarket_telegram_evidence_test", DIGEST_PATH)
 
     def _build_runtime(self, runtime_dir: Path, mode: str = "paper") -> None:

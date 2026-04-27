@@ -2,7 +2,14 @@ logging:
   file: logs/bot.log
   level: INFO
 polymarket:
+  clob_api_version: v2
+  clob_environment: read_only
   clob_api_url: https://clob.polymarket.com
+  clob_v2_read_only_url: https://clob-v2.polymarket.com
+  clob_urls:
+    production: https://clob.polymarket.com
+    staging: https://clob-v2.polymarket.com
+    read_only: https://clob-v2.polymarket.com
   gamma_api_url: https://gamma-api.polymarket.com
   assets:
   - btc
@@ -30,22 +37,42 @@ execution:
   quote_refresh_seconds: 5
   resolution_initial_poll_seconds: 10
   resolution_poll_cap_seconds: 300
+  live_order_approval: false
   directional_order_ttl_enabled: true
   directional_order_ttl_seconds:
     time_decay: 3
     spot_momentum: 5
     opening_range: 10
     mean_reversion_5min: 10
+  fill_policy:
+    min_rest_seconds: 1.0
+    max_fill_fraction_per_snapshot: 0.25
+    allow_same_snapshot_fill: false
+    max_book_age_ms: 1000
+    max_external_spot_age_ms: 1000
+    max_ws_lag_ms: 1000
+    cancel_latency_ms: 250
 strategies:
-  # toxicity_mm remains the baseline maker; time_decay is active with
-  # tightly bounded endgame sizing so runtime/autoresearch can attribute PnL.
-  active:
-  - toxicity_mm
-  - time_decay
+  active: []
+  states:
+    toxicity_mm: disabled
+    toxicity_mm_v2: scanner_only
+    time_decay: disabled
+    mean_reversion_5min: candidate_only
+    opening_range: candidate_only
+    spot_momentum: candidate_only
+    terminal_fair_value: scanner_only
+    lag_scanner: scanner_only
+    complement_dislocation: scanner_only
+  promotion_requires_human_approval: true
+  allow_unapproved_activation: false
   candidates:
   - mean_reversion_5min
   - opening_range
   - spot_momentum
+  - terminal_fair_value
+  - lag_scanner
+  - complement_dislocation
   mean_reversion_5min:
     deviation_threshold: 0.03
     ema_period: 20

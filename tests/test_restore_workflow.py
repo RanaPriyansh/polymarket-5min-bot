@@ -95,7 +95,7 @@ class RestoreWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "enable_order_book": True,
         }
 
-    def _orderbook(self, *, up_bid, up_ask, down_bid, down_ask, ts):
+    def _orderbook(self, *, up_bid, up_ask, down_bid, down_ask, ts, last_trade_price=None, last_trade_size=0.0):
         return OrderBook(
             market_id="m1",
             yes_asks=[(up_ask, 100)],
@@ -109,6 +109,14 @@ class RestoreWorkflowTests(unittest.IsolatedAsyncioTestCase):
             slot_id=self.market["slot_id"],
             end_ts=self.market["end_ts"],
             token_ids=self.market["token_ids"],
+            tick_size=0.01,
+            min_order_size=1.0,
+            last_trade_price=last_trade_price,
+            last_trade_size=last_trade_size,
+            token_book_metadata={
+                "up-token": {"last_trade_price": last_trade_price, "tick_size": 0.01, "min_order_size": 1.0},
+                "down-token": {"last_trade_price": None, "tick_size": 0.01, "min_order_size": 1.0},
+            },
         )
 
     def test_normalize_market_payload_from_slug_shape(self):
@@ -369,7 +377,15 @@ class RestoreWorkflowTests(unittest.IsolatedAsyncioTestCase):
                     market=market,
                 )
                 created_ts = executor.orders[order_id]["timestamp"]
-                crossed_book = self._orderbook(up_bid=0.49, up_ask=0.50, down_bid=0.50, down_ask=0.52, ts=created_ts + 2.0)
+                crossed_book = self._orderbook(
+                    up_bid=0.49,
+                    up_ask=0.50,
+                    down_bid=0.50,
+                    down_ask=0.52,
+                    ts=created_ts + 2.0,
+                    last_trade_price=0.49,
+                    last_trade_size=20.0,
+                )
                 fills = executor.evaluate_market_orders("m1", crossed_book)
                 self.assertEqual(len(fills), 1)
                 self.assertAlmostEqual(fills[0]["size"], 5.0)
