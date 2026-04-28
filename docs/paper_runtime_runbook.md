@@ -320,3 +320,49 @@ cd /root/obsidian-hermes-vault/projects/polymarket-5min-bot
 Expected result: failure with live-mode blocked message.
 
 Do not change this during debug/hardening.
+
+## 15. CLOB V2 read-only checks
+
+Config supports:
+- `polymarket.clob_api_version: v2`
+- `polymarket.clob_environment`
+- `polymarket.clob_urls.production`
+- `polymarket.clob_urls.staging`
+- `polymarket.clob_urls.read_only`
+
+Read-only smoke endpoints:
+
+```bash
+cd /root/obsidian-hermes-vault/projects/polymarket-5min-bot
+.venv/bin/python - <<'PY'
+import asyncio
+from cli import load_cfg
+from market_data import PolymarketData
+
+async def main():
+    async with PolymarketData(load_cfg()) as md:
+        print(await md.clob_read_only_check())
+
+asyncio.run(main())
+PY
+```
+
+This check only touches public market-data endpoints. It must not enable live order placement.
+
+## 16. Canonical evidence mart
+
+Build canonical decision/fill/settlement evidence:
+
+```bash
+cd /root/obsidian-hermes-vault/projects/polymarket-5min-bot
+.venv/bin/python cli.py build-evidence-mart --runtime-dir data/runtime
+.venv/bin/python cli.py analyze-family-performance --runtime-dir data/runtime
+.venv/bin/python cli.py analyze-tte-performance --runtime-dir data/runtime
+.venv/bin/python cli.py analyze-markout-vs-settlement --runtime-dir data/runtime
+```
+
+Outputs:
+- `data/research/evidence_mart/latest.json`
+- `data/research/evidence_mart/latest.md`
+
+Gate is RED if fills or settlements are missing direct `strategy_family` or `slot_id` linkage.

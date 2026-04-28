@@ -53,7 +53,8 @@ class ExecutionSignalPolicyTests(unittest.IsolatedAsyncioTestCase):
             "end_ts": time.time() + 300.0,
         }
 
-    def _book(self, *, yes_bid=0.60, yes_ask=0.61, no_bid=0.39, no_ask=0.40, ts=100.0):
+    def _book(self, *, yes_bid=0.60, yes_ask=0.61, no_bid=0.39, no_ask=0.40, ts=100.0,
+              last_trade_price=None, last_trade_size=0.0):
         return OrderBook(
             market_id="m1",
             yes_asks=[(yes_ask, 10)],
@@ -63,6 +64,13 @@ class ExecutionSignalPolicyTests(unittest.IsolatedAsyncioTestCase):
             timestamp=ts,
             sequence=1,
             outcome_labels=("Up", "Down"),
+            token_ids={"Up": "up-token", "Down": "down-token"},
+            last_trade_price=last_trade_price,
+            last_trade_size=last_trade_size,
+            token_book_metadata={
+                "up-token": {"last_trade_price": last_trade_price, "last_trade_size": last_trade_size},
+                "down-token": {"last_trade_price": None, "last_trade_size": 0.0},
+            },
         )
 
     def _signal(self, *, outcome="Up", action="BUY", price=0.60, size=2.0, reason="test-entry"):
@@ -183,7 +191,7 @@ class ExecutionSignalPolicyTests(unittest.IsolatedAsyncioTestCase):
             created_ts = executor.orders[result["order_id"]]["timestamp"]
             fills = executor.evaluate_market_orders(
                 "m1",
-                self._book(yes_bid=0.58, yes_ask=0.59, ts=created_ts + 2.0),
+                self._book(yes_bid=0.58, yes_ask=0.59, ts=created_ts + 2.0, last_trade_price=0.58, last_trade_size=10.0),
             )
             self.assertEqual(len(fills), 1)
             slot = executor.signal_slots["btc:5:100"]
@@ -365,7 +373,10 @@ class ExecutionSignalPolicyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(marker.calls, [])
 
             executor.orders[result["order_id"]]["timestamp"] = 100.0
-            fills = executor.evaluate_market_orders("m1", self._book(yes_bid=0.58, yes_ask=0.59, ts=102.0))
+            fills = executor.evaluate_market_orders(
+                "m1",
+                self._book(yes_bid=0.58, yes_ask=0.59, ts=102.0, last_trade_price=0.58, last_trade_size=10.0),
+            )
             self.assertEqual(len(fills), 1)
             event = _mark_directional_fired_on_fill(fills[0], time_decay=marker)
             self.assertIsNotNone(event)

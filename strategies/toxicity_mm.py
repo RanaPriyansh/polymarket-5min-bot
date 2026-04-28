@@ -26,6 +26,14 @@ class MMQuote:
     book_quality: Dict
 
 
+@dataclass
+class ToxicityVeto:
+    avoid_quoting: bool
+    action: str
+    reasons: list[str]
+    score: float
+
+
 class ToxicityMM:
     def __init__(self, config: dict):
         self.config = config
@@ -60,6 +68,39 @@ class ToxicityMM:
 
     def assess_book(self, orderbook: OrderBook, outcome: str = "YES") -> BookQuality:
         return assess_tradeability(self.config, "toxicity_mm", orderbook, outcome)
+
+    def assess_adverse_selection(
+        self,
+        orderbook: OrderBook,
+        *,
+        external_spot_velocity: float = 0.0,
+        external_spot_acceleration: float = 0.0,
+        recent_sweep_size: float = 0.0,
+        recent_failed_fills: int = 0,
+    ) -> ToxicityVeto:
+        reasons: list[str] = []
+        score = 0.0
+        quality = self.assess_book(orderbook, orderbook.outcome_labels[0])
+        if not quality.is_tradeable:
+            reasons.extend(quality.reasons)
+            score += 1.0
+        if abs(external_spot_velocity) > 0.001:
+            reasons.append("high_external_spot_velocity")
+            score += 0.5
+        if abs(external_spot_acceleration) > 0.001:
+            reasons.append("high_external_spot_acceleration")
+            score += 0.5
+        if recent_sweep_size > 0:
+            reasons.append("recent_polymarket_sweep")
+            score += min(1.0, recent_sweep_size / 100.0)
+        if recent_failed_fills > 0:
+            reasons.append("recent_failed_or_cancelled_fills")
+            score += min(1.0, recent_failed_fills / 5.0)
+        if float(getattr(orderbook, "book_age_ms", 0.0) or 0.0) > 500:
+            reasons.append("stale_book")
+            score += 0.5
+        action = "do_not_place_quote" if reasons else "quote_allowed"
+        return ToxicityVeto(avoid_quoting=bool(reasons), action=action, reasons=reasons, score=round(score, 4))
 
     def get_optimal_spread(self, volatility_estimate: float, vpin: float, quality: BookQuality) -> float:
         base = self.base_spread_bps / 10000.0

@@ -37,12 +37,32 @@ class OrderBook:
     slot_id: str = ""
     end_ts: float = 0.0
     token_ids: Dict[str, str] = field(default_factory=dict)
+    token_id: str = ""
+    condition_id: str = ""
+    best_bid: float = 0.0
+    best_ask: float = 0.0
+    spread: float = 0.0
+    tick_size: Optional[float] = None
+    min_order_size: Optional[float] = None
+    hash: str = ""
+    neg_risk: Optional[bool] = None
+    fees_enabled: Optional[bool] = None
+    fee_schedule: Dict[str, Any] = field(default_factory=dict)
+    last_trade_price: Optional[float] = None
+    last_trade_size: float = 0.0
+    book_age_ms: float = 0.0
+    ws_lag_ms: float = 0.0
+    market_metadata_incomplete: bool = False
+    token_book_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 class PolymarketData:
     def __init__(self, config: dict, redis_client=None):
         polymarket_cfg = config["polymarket"]
-        self.clob_url = polymarket_cfg["clob_api_url"]
+        self.clob_api_version = str(polymarket_cfg.get("clob_api_version", "v1")).lower()
+        self.clob_environment = str(polymarket_cfg.get("clob_environment", "production")).lower()
+        self.clob_urls = dict(polymarket_cfg.get("clob_urls", {}) or {})
+        self.clob_url = self._resolve_clob_url(polymarket_cfg)
         self.gamma_url = polymarket_cfg["gamma_api_url"]
         self.assets = list(polymarket_cfg.get("assets", ["btc", "eth", "sol", "xrp"]))
         self.intervals = [int(value) for value in polymarket_cfg.get("intervals", [5, 15])]
@@ -64,6 +84,13 @@ class PolymarketData:
         self.markets_cache: Dict[str, Dict] = {}
         self.market_index_by_id: Dict[str, Dict] = {}
         self.orderbooks: Dict[str, OrderBook] = {}
+
+    def _resolve_clob_url(self, polymarket_cfg: Dict[str, Any]) -> str:
+        if self.clob_environment in self.clob_urls:
+            return str(self.clob_urls[self.clob_environment]).rstrip("/")
+        if self.clob_api_version == "v2" and polymarket_cfg.get("clob_v2_read_only_url"):
+            return str(polymarket_cfg["clob_v2_read_only_url"]).rstrip("/")
+        return str(polymarket_cfg.get("clob_api_url", "https://clob.polymarket.com")).rstrip("/")
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(headers=self.headers)
@@ -187,6 +214,65 @@ class PolymarketData:
                 logger.warning("Network error fetching %s (attempt %d/%d): %s", url, attempt + 1, max_retries, exc)
                 await asyncio.sleep(2 ** attempt)
         raise last_exc  # type: ignore[misc]
+
+    async def _fetch_public(self, path: str, max_retries: int = 3) -> Tuple[Any, aiohttp.typedefs.LooseHeaders]:
+        if not path.startswith("/"):
+            path = f"/{path}"
+        if not self.session:
+            raise RuntimeError("PolymarketData session not initialized")
+        url = f"{self.clob_url}{path}"
+        import socket
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                async with self.session.get(url) as resp:
+                    text = await resp.text()
+                    if resp.status >= 400:
+                        raise RuntimeError(f"Polymarket request failed ({resp.status}) for {url}: {text}")
+                    try:
+                        return json.loads(text), resp.headers
+                    except json.JSONDecodeError:
+                        return text.strip(), resp.headers
+            except (socket.gaierror, OSError, ConnectionError) as exc:
+                last_exc = exc
+                logger.warning("Network error fetching %s (attempt %d/%d): %s", url, attempt + 1, max_retries, exc)
+                await asyncio.sleep(2 ** attempt)
+        raise last_exc  # type: ignore[misc]
+
+    async def clob_read_only_check(self) -> Dict[str, Any]:
+        """Read-only CLOB smoke check for V2 cutover readiness.
+
+        This intentionally touches only public endpoints.
+        """
+        ok_payload, _ = await self._fetch_public("/ok")
+        version_payload, _ = await self._fetch_public("/version")
+        time_payload, _ = await self._fetch_public("/time")
+        server_time = self._normalize_server_time(time_payload)
+        return {
+            "clob_api_version": self.clob_api_version,
+            "clob_environment": self.clob_environment,
+            "clob_url": self.clob_url,
+            "ok": ok_payload,
+            "version": version_payload,
+            "server_time": server_time,
+            "clock_drift_seconds": abs(time.time() - server_time) if server_time else None,
+        }
+
+    @staticmethod
+    def _normalize_server_time(payload: Any) -> float:
+        if isinstance(payload, (int, float)):
+            return float(payload)
+        if isinstance(payload, str):
+            try:
+                return float(payload)
+            except ValueError:
+                return 0.0
+        if isinstance(payload, dict):
+            for key in ("time", "server_time", "timestamp"):
+                if key in payload:
+                    return PolymarketData._normalize_server_time(payload[key])
+        return 0.0
 
     def _normalize_market_payload(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         slug = raw.get("slug") or raw.get("ticker")
@@ -325,6 +411,41 @@ class PolymarketData:
         ]
         return sorted(pairs, key=lambda item: item[0], reverse=reverse)
 
+    @staticmethod
+    def _optional_float(value: Any) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _book_metadata(cls, payload: Dict[str, Any], token_id: str) -> Dict[str, Any]:
+        fee_schedule = payload.get("fee_schedule") or payload.get("fees") or {}
+        if not isinstance(fee_schedule, dict):
+            fee_schedule = {"raw": fee_schedule}
+        return {
+            "token_id": str(payload.get("asset_id") or payload.get("token_id") or token_id),
+            "condition_id": str(payload.get("condition_id") or payload.get("market") or ""),
+            "timestamp": cls._optional_float(payload.get("timestamp")),
+            "hash": str(payload.get("hash") or ""),
+            "min_order_size": cls._optional_float(payload.get("min_order_size")),
+            "tick_size": cls._optional_float(payload.get("tick_size")),
+            "neg_risk": payload.get("neg_risk"),
+            "fees_enabled": payload.get("fees_enabled"),
+            "fee_schedule": fee_schedule,
+            "last_trade_price": cls._optional_float(payload.get("last_trade_price")),
+            "last_trade_size": cls._optional_float(payload.get("last_trade_size") or payload.get("last_trade_qty") or payload.get("last_trade_quantity")),
+        }
+
+    @staticmethod
+    def _metadata_incomplete(*metadata_items: Dict[str, Any]) -> bool:
+        for metadata in metadata_items:
+            if metadata.get("tick_size") is None or metadata.get("min_order_size") is None:
+                return True
+        return False
+
     async def get_orderbook(self, market: Dict | str, outcome: str = "YES") -> OrderBook:
         if isinstance(market, str):
             market_data = self.market_index_by_id.get(market) or self.markets_cache.get(market)
@@ -340,20 +461,52 @@ class PolymarketData:
         )
         first_outcome, second_outcome = market_data["outcomes"][:2]
         first_book, second_book = books[:2]
+        first_token_id = str(market_data["tokens"][0]["token_id"])
+        second_token_id = str(market_data["tokens"][1]["token_id"])
+        first_metadata = self._book_metadata(first_book, first_token_id)
+        second_metadata = self._book_metadata(second_book, second_token_id)
         timestamp_ms = float(first_book.get("timestamp") or second_book.get("timestamp") or (time.time() * 1000))
+        yes_bids = self._normalize_levels(first_book.get("bids", []), reverse=True)
+        yes_asks = self._normalize_levels(first_book.get("asks", []), reverse=False)
+        no_bids = self._normalize_levels(second_book.get("bids", []), reverse=True)
+        no_asks = self._normalize_levels(second_book.get("asks", []), reverse=False)
+        best_bid = yes_bids[0][0] if yes_bids else 0.0
+        best_ask = yes_asks[0][0] if yes_asks else 0.0
+        timestamp_s = timestamp_ms / 1000.0
+        tick_size = first_metadata.get("tick_size")
+        min_order_size = first_metadata.get("min_order_size")
         ob = OrderBook(
             market_id=market_data["id"],
-            yes_asks=self._normalize_levels(first_book.get("asks", []), reverse=False),
-            yes_bids=self._normalize_levels(first_book.get("bids", []), reverse=True),
-            no_asks=self._normalize_levels(second_book.get("asks", []), reverse=False),
-            no_bids=self._normalize_levels(second_book.get("bids", []), reverse=True),
-            timestamp=timestamp_ms / 1000.0,
+            yes_asks=yes_asks,
+            yes_bids=yes_bids,
+            no_asks=no_asks,
+            no_bids=no_bids,
+            timestamp=timestamp_s,
             sequence=int(timestamp_ms),
             outcome_labels=(first_outcome, second_outcome),
             market_slug=market_data["slug"],
             slot_id=market_data["slot_id"],
             end_ts=float(market_data["end_ts"]),
             token_ids=market_data["token_ids"],
+            token_id=first_metadata["token_id"],
+            condition_id=str(market_data.get("condition_id") or first_metadata.get("condition_id") or ""),
+            best_bid=best_bid,
+            best_ask=best_ask,
+            spread=max(best_ask - best_bid, 0.0) if best_bid and best_ask else 0.0,
+            tick_size=tick_size,
+            min_order_size=min_order_size,
+            hash=str(first_metadata.get("hash") or ""),
+            neg_risk=first_metadata.get("neg_risk"),
+            fees_enabled=first_metadata.get("fees_enabled"),
+            fee_schedule=dict(first_metadata.get("fee_schedule") or {}),
+            last_trade_price=first_metadata.get("last_trade_price"),
+            last_trade_size=float(first_metadata.get("last_trade_size") or 0.0),
+            book_age_ms=max(0.0, (time.time() - timestamp_s) * 1000.0),
+            market_metadata_incomplete=self._metadata_incomplete(first_metadata, second_metadata),
+            token_book_metadata={
+                first_token_id: first_metadata,
+                second_token_id: second_metadata,
+            },
         )
         self.orderbooks[market_data["id"]] = ob
         return ob

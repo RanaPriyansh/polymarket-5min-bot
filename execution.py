@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 
 from ledger import LedgerEvent, SQLiteLedger
+from market_data import PolymarketData
 from paper_exchange import ConservativeFillEngine, FillPolicy, OrderBookSnapshot
 from replay import replay_ledger
 from settlement_engine import SettlementEngine
@@ -139,6 +140,11 @@ class PolymarketExecutor:
                 min_rest_seconds=float(fill_policy_cfg.get("min_rest_seconds", 1.0)),
                 max_fill_fraction_per_snapshot=float(fill_policy_cfg.get("max_fill_fraction_per_snapshot", 0.25)),
                 allow_same_snapshot_fill=bool(fill_policy_cfg.get("allow_same_snapshot_fill", False)),
+                max_book_age_ms=float(fill_policy_cfg.get("max_book_age_ms", 1000.0)),
+                max_external_spot_age_ms=float(fill_policy_cfg.get("max_external_spot_age_ms", 1000.0)),
+                max_ws_lag_ms=float(fill_policy_cfg.get("max_ws_lag_ms", 1000.0)),
+                cancel_latency_ms=float(fill_policy_cfg.get("cancel_latency_ms", 250.0)),
+                taker_fee_bps=float(fill_policy_cfg.get("taker_fee_bps", 0.0)),
             )
         )
         self.settlement_engine = SettlementEngine()
@@ -166,13 +172,19 @@ class PolymarketExecutor:
 
     async def __aenter__(self):
         if self.mode == "live":
-            self.session = aiohttp.ClientSession()
+            self._raise_live_block()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.session:
             await self.session.close()
             self.session = None
+
+    def _raise_live_block(self) -> None:
+        raise RuntimeError(
+            "Live order path is hard-blocked. V2 signed-order construction, geoblock checks, "
+            "pUSD collateral handling, and explicit human approval are required before live mode."
+        )
 
     def _next_sequence(self, stream: str, aggregate_id: str) -> int:
         key = (stream, aggregate_id)
@@ -381,6 +393,12 @@ class PolymarketExecutor:
                 "created_ts": float(order.get("timestamp", time.time())),
                 "market_end_ts": order.get("market_end_ts"),
                 "wallet": order.get("wallet", self.wallet_address),
+                "strategy_variant": order.get("strategy_variant"),
+                "maker_or_taker": "maker" if order.get("post_only", True) else "taker",
+                "model_fair": order.get("model_fair"),
+                "model_edge": order.get("model_edge"),
+                "entry_reason": order.get("entry_reason") or order.get("reason"),
+                "risk_budget_used": order.get("risk_budget_used"),
             },
         )
 
@@ -465,6 +483,13 @@ class PolymarketExecutor:
                 "observed_ts": float(fill_ts),
                 "best_bid": float(best_bid),
                 "best_ask": float(best_ask),
+                "maker_or_taker": "maker" if order.get("post_only", True) else "taker",
+                "fill_reason": order.get("fill_reason", "direct_paper_fill"),
+                "paper_fill_reason": order.get("paper_fill_reason", order.get("fill_reason", "direct_paper_fill")),
+                "paper_fill_confidence": order.get("paper_fill_confidence", 0.5),
+                "simulator_assumption": order.get("simulator_assumption", "direct_fill_without_book_walk"),
+                "fees_estimated": float(order.get("fees_estimated", 0.0)),
+                "slippage": float(order.get("slippage", 0.0)),
             },
         )
 
@@ -569,28 +594,7 @@ class PolymarketExecutor:
             order["market_end_ts"] = market["end_ts"]
 
         if self.mode == "live":
-            token_id = market["token_ids"][outcome] if market else self._get_token_id(market_id, outcome)
-            payload = {
-                "market_id": market_id,
-                "token_id": token_id,
-                "side": side.lower(),
-                "size": str(size),
-                "price": str(round(price, 4)),
-                "type": "LIMIT",
-                "post_only": post_only,
-                "wallet": self.wallet_address,
-            }
-            try:
-                async with self.session.post(f"{self.clob_url}/order", json=payload) as resp:
-                    if resp.status != 200:
-                        logger.error("Order failed: %s - %s", resp.status, await resp.text())
-                        return None
-                    data = await resp.json()
-                    order_id = data.get("order_id", order_id)
-                    order["order_id"] = order_id
-            except Exception as exc:
-                logger.exception("Exception placing order: %s", exc)
-                return None
+            self._raise_live_block()
 
         self.orders[order_id] = order
         family_metrics["orders_resting"] += 1
@@ -609,13 +613,7 @@ class PolymarketExecutor:
             return False
 
         if self.mode == "live":
-            try:
-                async with self.session.delete(f"{self.clob_url}/order/{order_id}") as resp:
-                    if resp.status != 200:
-                        return False
-            except Exception as exc:
-                logger.error("Cancel error: %s", exc)
-                return False
+            self._raise_live_block()
 
         order["status"] = "cancelled"
         metrics = self._ensure_family_metrics(order["strategy_family"])
@@ -783,10 +781,72 @@ class PolymarketExecutor:
             "realized_pnl_delta": realized_delta,
             "fill_price": executed_price,
             "size": executed_size,
+            "maker_or_taker": observed_event.payload.get("maker_or_taker", "unknown") if observed_event else "unknown",
+            "fill_reason": observed_event.payload.get("fill_reason", "unknown") if observed_event else "unknown",
+            "paper_fill_reason": observed_event.payload.get("paper_fill_reason", "unknown") if observed_event else "unknown",
+            "paper_fill_confidence": observed_event.payload.get("paper_fill_confidence") if observed_event else None,
+            "fees_estimated": observed_event.payload.get("fees_estimated", 0.0) if observed_event else 0.0,
+            "slippage": observed_event.payload.get("slippage", 0.0) if observed_event else 0.0,
         }
         if slot_state is not None:
             result["slot_state"] = asdict(slot_state)
         return result
+
+    def _last_trade_price(self, orderbook: "OrderBook", outcome: str) -> float | None:
+        token_id = getattr(orderbook, "token_ids", {}).get(outcome)
+        if token_id:
+            metadata = getattr(orderbook, "token_book_metadata", {}).get(token_id, {})
+            value = metadata.get("last_trade_price")
+            if value is not None:
+                return float(value)
+        value = getattr(orderbook, "last_trade_price", None)
+        return float(value) if value is not None else None
+
+    def _last_trade_size(self, orderbook: "OrderBook", outcome: str) -> float:
+        token_id = getattr(orderbook, "token_ids", {}).get(outcome)
+        if token_id:
+            metadata = getattr(orderbook, "token_book_metadata", {}).get(token_id, {})
+            value = metadata.get("last_trade_size")
+            if value is not None:
+                return float(value)
+        return float(getattr(orderbook, "last_trade_size", 0.0) or 0.0)
+
+    def _taker_levels(self, orderbook: "OrderBook", outcome: str, side: str) -> List[Tuple[float, float]]:
+        bids, asks = PolymarketData._levels_for_outcome(orderbook, outcome)
+        return asks if side.upper() == "BUY" else bids
+
+    def _fill_taker_from_book(self, order_id: str, orderbook: "OrderBook") -> Dict:
+        order = self.orders[order_id]
+        fill_plan = self.fill_engine.walk_taker_book(
+            order,
+            self._taker_levels(orderbook, order["outcome"], order["side"]),
+            snapshot_ts=float(orderbook.timestamp),
+            book_age_ms=float(getattr(orderbook, "book_age_ms", 0.0) or 0.0),
+            ws_lag_ms=float(getattr(orderbook, "ws_lag_ms", 0.0) or 0.0),
+            market_metadata_incomplete=bool(getattr(orderbook, "market_metadata_incomplete", False)),
+            fees_enabled=bool(getattr(orderbook, "fees_enabled", False)),
+        )
+        if not fill_plan.get("filled"):
+            return {
+                "filled": False,
+                "order_id": order_id,
+                "reason": fill_plan.get("reason", "paper_taker_rejected"),
+                "fill_reason": fill_plan.get("fill_reason", fill_plan.get("reason", "paper_taker_rejected")),
+            }
+        order.update({
+            "fill_reason": fill_plan["fill_reason"],
+            "paper_fill_reason": fill_plan.get("paper_fill_reason", fill_plan["fill_reason"]),
+            "paper_fill_confidence": fill_plan.get("paper_fill_confidence"),
+            "simulator_assumption": fill_plan.get("simulator_assumption"),
+            "fees_estimated": fill_plan.get("fees_estimated", 0.0),
+            "slippage": fill_plan.get("slippage", 0.0),
+        })
+        return self.fill_order(
+            order_id,
+            fill_price=float(fill_plan["fill_price"]),
+            fill_size=float(fill_plan["fill_size"]),
+            fill_ts=float(fill_plan["fill_ts"]),
+        )
 
     def evaluate_market_orders(self, market_id: str, orderbook: "OrderBook"):
         fills = []
@@ -797,6 +857,11 @@ class PolymarketExecutor:
                 timestamp=float(orderbook.timestamp),
                 best_bid=float(self.md.best_bid(orderbook, order["outcome"])),
                 best_ask=float(self.md.best_ask(orderbook, order["outcome"])),
+                last_trade_price=self._last_trade_price(orderbook, order["outcome"]),
+                last_trade_size=self._last_trade_size(orderbook, order["outcome"]),
+                book_age_ms=float(getattr(orderbook, "book_age_ms", 0.0) or 0.0),
+                ws_lag_ms=float(getattr(orderbook, "ws_lag_ms", 0.0) or 0.0),
+                market_metadata_incomplete=bool(getattr(orderbook, "market_metadata_incomplete", False)),
             )
             observed = self.fill_engine.observe_fill(
                 order,
@@ -881,24 +946,33 @@ class PolymarketExecutor:
         )
         if not order_id:
             return []
-        fill = self.fill_order(order_id, fill_price=fill_price, fill_ts=orderbook.timestamp)
-        slot.status = "closed"
-        slot.updated_ts = orderbook.timestamp
-        slot.close_reason = reason
-        self.signal_slots.pop(slot_id, None)
+        fill = self._fill_taker_from_book(order_id, orderbook)
+        if not fill.get("filled"):
+            await self.cancel_order(order_id)
+            return []
+        remaining_quantity = self._signal_slot_quantity(slot)
+        fully_closed = abs(remaining_quantity) <= 1e-9
+        if fully_closed:
+            slot.status = "closed"
+            slot.close_reason = reason
+            self.signal_slots.pop(slot_id, None)
+        else:
+            slot.quantity = remaining_quantity
+            slot.updated_ts = orderbook.timestamp
         return [
             {
-                "event_type": "position.closed",
+                "event_type": "position.closed" if fully_closed else "position.reduced",
                 "slot_id": slot_id,
                 "market_id": slot.market_id,
                 "market_slug": slot.market_slug,
                 "strategy_family": slot.strategy_family,
                 "outcome": slot.outcome,
-                "size": abs(quantity),
+                "size": float(fill.get("size", 0.0)),
                 "close_side": side,
-                "fill_price": fill_price,
+                "fill_price": fill.get("fill_price", fill_price),
                 "realized_pnl_delta": fill.get("realized_pnl_delta", 0.0),
                 "reason": reason,
+                "remaining_quantity": remaining_quantity,
             },
             {
                 **fill,
@@ -995,7 +1069,29 @@ class PolymarketExecutor:
                 "resting_order_price": order_price,
             }
 
-        fill = self.fill_order(order_id, fill_price=float(fill_price), fill_ts=orderbook.timestamp)
+        fill = self._fill_taker_from_book(order_id, orderbook)
+        if not fill.get("filled"):
+            await self.cancel_order(order_id)
+            events.append({
+                "event_type": "order.rejected",
+                "slot_id": slot_id,
+                "market_id": market["id"],
+                "market_slug": market["slug"],
+                "strategy_family": strategy_family,
+                "outcome": signal.outcome,
+                "side": signal.action,
+                "price": order_price,
+                "reason": fill.get("reason", "paper_taker_rejected"),
+                "entry_style": fill_behavior["entry_style"],
+            })
+            return {
+                "opened": False,
+                "filled": False,
+                "order_id": order_id,
+                "reason": fill.get("reason", "paper_taker_rejected"),
+                "events": events,
+                "entry_style": fill_behavior["entry_style"],
+            }
         position = self.positions[(strategy_family, market["id"], signal.outcome)]
         slot_state = SlotState(
             slot_id=slot_id,
@@ -1270,6 +1366,16 @@ class PolymarketExecutor:
             settled_position_count = len(settlement_pos_events)
             total_realized_pnl = sum(e.get("realized_pnl_delta", 0.0) for e in settlement_pos_events)
             primary_pos = settlement_pos_events[0] if settled_position_count == 1 else None
+            settled_families = sorted({
+                str(event.get("strategy_family"))
+                for event in settlement_pos_events
+                if event.get("strategy_family")
+            })
+            settled_strategy_family = (
+                settled_families[0]
+                if len(settled_families) == 1
+                else ("flat" if not settled_families else "multiple")
+            )
             if settlement_pos_events:
                 self._persist_events(
                     self.settlement_engine.settled_event(
@@ -1281,6 +1387,9 @@ class PolymarketExecutor:
                         run_id=self.run_id,
                         sequence_num=self._next_sequence("market_slot", slot_id),
                         correlation_id=slot_id,
+                        strategy_family=settled_strategy_family,
+                        strategy_families=settled_families,
+                        settled_pnl=round(total_realized_pnl, 6),
                         position_count=settled_position_count,
                         position_outcome=primary_pos["outcome"] if primary_pos else None,
                         position_size=abs(primary_pos["quantity"]) if primary_pos else None,
@@ -1296,6 +1405,9 @@ class PolymarketExecutor:
                     "market_slug": refreshed_market["slug"],
                     "winning_outcome": winning_outcome,
                     "settled_ts": now_ts,
+                    "strategy_family": settled_strategy_family,
+                    "strategy_families": settled_families,
+                    "settled_pnl": round(total_realized_pnl, 6),
                     "position_count": settled_position_count,
                     "position_outcome": primary_pos["outcome"] if primary_pos else None,
                     "position_size": abs(primary_pos["quantity"]) if primary_pos else None,

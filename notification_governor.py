@@ -24,6 +24,14 @@ DEFAULT_OPS_TIMER = "polymarket-paper-ops-hourly.timer"
 DEFAULT_HEARTBEAT_STALE_SECONDS = 180
 
 
+def _default_state_path() -> Path:
+    try:
+        DEFAULT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        return DEFAULT_STATE_PATH
+    except OSError:
+        return Path(tempfile.gettempdir()) / "polymarket-5min-bot" / "notification_governor.json"
+
+
 @dataclass(frozen=True)
 class NotificationPolicy:
     digest_interval_seconds: int = 21600
@@ -62,7 +70,7 @@ class NotificationGovernor:
         elif state_path is None and env_state_dir:
             resolved_state_path = Path(env_state_dir) / "notification_governor.json"
         elif state_path is None:
-            resolved_state_path = DEFAULT_STATE_PATH
+            resolved_state_path = _default_state_path()
         else:
             resolved_state_path = Path(state_path)
         self.state_path = resolved_state_path
@@ -487,12 +495,6 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _systemd_unit_status(unit_name: str) -> dict[str, Any]:
-    proc = subprocess.run(
-        ["systemctl", "show", unit_name, "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "--no-pager"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
     result: dict[str, Any] = {
         "unit": unit_name,
         "active_state": "unknown",
@@ -501,6 +503,15 @@ def _systemd_unit_status(unit_name: str) -> dict[str, Any]:
         "main_pid": 0,
         "ok": False,
     }
+    try:
+        proc = subprocess.run(
+            ["systemctl", "show", unit_name, "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "--no-pager"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return result
     if proc.returncode != 0:
         return result
     for line in proc.stdout.splitlines():
