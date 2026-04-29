@@ -63,6 +63,7 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
         write_family_scoreboard(research_artifact_dir, family_scoreboard)
         write_bucket_scoreboard(research_artifact_dir, bucket_scoreboard)
         family_verdict = verdict_from_scoreboard(family_scoreboard)
+        family_score_by_name = {row.family: row for row in family_scoreboard}
 
         family_summaries = self._family_summaries(metrics)
         skip_counter = self._skip_counter(samples)
@@ -71,6 +72,17 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
         quote_skips = [e for e in events if e.get("event_type") == "quote.skipped"]
 
         for family, summary in family_summaries.items():
+            family_score = family_score_by_name.get(family)
+            if family_score and family_score.promotion_state == "demoted":
+                summary = dict(summary)
+                summary["recommendation"] = (
+                    f"KILL {family}: settled scoreboard is negative enough to demote "
+                    f"(pnl_per_trade={family_score.pnl_per_trade:.4f}, settled={family_score.settled_trades}, "
+                    f"win_rate={family_score.win_rate:.1%}). Do not emit KEEP actions from short-window runtime metrics."
+                )
+                summary["action"] = f"Remove {family} from active strategies until a bounded isolated bakeoff earns re-promotion."
+                summary["confidence"] = max(float(summary.get("confidence", 0.0) or 0.0), 0.9)
+                summary["scoreboard_state"] = family_score.to_dict()
             hypotheses.append(
                 ResearchHypothesis(
                     hypothesis_id=f"family-{family}",
@@ -110,16 +122,24 @@ class PolymarketRuntimeResearchAdapter(ResearchAdapter):
             next_actions.append(summary["action"])
 
         if baseline_strategy or research_candidates:
+            baseline_score = family_score_by_name.get(str(baseline_strategy or ""))
+            baseline_demoted = bool(baseline_score and baseline_score.promotion_state == "demoted")
             insights.append(
                 ResearchInsight(
                     title="Strategy governance state",
                     observation=(
                         f"Baseline={baseline_strategy or 'unset'}; research_candidates={', '.join(research_candidates) if research_candidates else 'none'}."
                     ),
-                    recommendation="Keep capital and runtime attention on the baseline until a candidate earns promotion with settled paper evidence.",
-                    confidence=0.9,
+                    recommendation=(
+                        f"Do NOT keep capital on baseline={baseline_strategy}; scoreboard says KILL/demote until isolated bakeoff proves recovery."
+                        if baseline_demoted
+                        else "Keep capital and runtime attention on the baseline until a candidate earns promotion with settled paper evidence."
+                    ),
+                    confidence=0.95 if baseline_demoted else 0.9,
                     evidence={
                         "baseline_strategy": baseline_strategy,
+                        "baseline_demoted": baseline_demoted,
+                        "baseline_scoreboard_state": baseline_score.to_dict() if baseline_score else None,
                         "research_candidates": list(research_candidates),
                     },
                 )

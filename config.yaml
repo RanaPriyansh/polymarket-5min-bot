@@ -21,10 +21,10 @@ polymarket:
   - 15
   fallback_windows: 1
 risk:
-  circuit_breaker_dd: 0.1
-  max_daily_loss: 0.05
-  max_position_size: 0.1
-  max_risk_per_trade_usd: 10
+  circuit_breaker_dd: 0.03
+  max_daily_loss: 0.01
+  max_position_size: 0.03
+  max_risk_per_trade_usd: 2
 filters:
   max_book_spread_bps: 500
   min_top_depth: 2
@@ -53,6 +53,8 @@ execution:
     max_ws_lag_ms: 1000
     cancel_latency_ms: 250
 strategies:
+  # Hard safety posture after the 2026-04-29 daily-loss stop: no active family
+  # may trade without explicit human approval and isolated positive evidence.
   active: []
   states:
     toxicity_mm: disabled
