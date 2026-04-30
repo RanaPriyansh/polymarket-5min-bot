@@ -53,13 +53,14 @@ execution:
     max_ws_lag_ms: 1000
     cancel_latency_ms: 250
 strategies:
-  # Hard safety posture after the 2026-04-29 daily-loss stop: no active family
-  # may trade without explicit human approval and isolated positive evidence.
-  active: []
+  # Human-approved exploratory paper-active mode (2026-04-30): run one bounded
+  # candidate under unchanged risk constraints while autoresearch can still demote it.
+  active:
+  - time_decay
   states:
     toxicity_mm: disabled
     toxicity_mm_v2: scanner_only
-    time_decay: disabled
+    time_decay: paper_active
     mean_reversion_5min: candidate_only
     opening_range: candidate_only
     spot_momentum: candidate_only

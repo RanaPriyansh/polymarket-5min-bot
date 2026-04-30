@@ -186,11 +186,11 @@ class TimeDecayVariableSizeTests(unittest.TestCase):
             2.0 / max_signal.price,
         )
 
-    def test_config_keeps_time_decay_disabled_with_controlled_sizing_defaults(self):
+    def test_config_runs_time_decay_as_human_approved_exploratory_paper_strategy(self):
         cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8"))
 
-        self.assertNotIn("time_decay", cfg["strategies"]["active"])
-        self.assertEqual(cfg["strategies"]["states"]["time_decay"], "disabled")
+        self.assertIn("time_decay", cfg["strategies"]["active"])
+        self.assertEqual(cfg["strategies"]["states"]["time_decay"], "paper_active")
         self.assertEqual(cfg["strategies"]["time_decay"]["min_notional_usd"], 1.0)
         self.assertEqual(cfg["strategies"]["time_decay"]["max_notional_usd"], 6.0)
         self.assertEqual(cfg["strategies"]["time_decay"]["max_price"], 0.92)
