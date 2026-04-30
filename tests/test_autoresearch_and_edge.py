@@ -58,13 +58,35 @@ class AutoresearchAndEdgeTests(unittest.IsolatedAsyncioTestCase):
             artifact_dir = Path(tmpdir) / "research"
             self.assertTrue((artifact_dir / "latest.json").exists())
             self.assertTrue((artifact_dir / "latest.md").exists())
+            self.assertTrue((artifact_dir / "tasks_latest.json").exists())
+            self.assertTrue((artifact_dir / "loop_log.jsonl").exists())
             timestamped_json = sorted(
-                path for path in artifact_dir.glob("*.json") if path.name not in {"latest.json", "family_scoreboard.json", "bucket_scoreboard.json"}
+                path
+                for path in artifact_dir.glob("*.json")
+                if path.name
+                not in {"latest.json", "family_scoreboard.json", "bucket_scoreboard.json", "tasks_latest.json"}
             )
             self.assertEqual(len(timestamped_json), 1)
             latest_payload = json.loads((artifact_dir / "latest.json").read_text(encoding="utf-8"))
             self.assertEqual(latest_payload["source"], "live-runtime-artifacts")
             self.assertTrue(latest_payload["next_actions"])
+            self.assertTrue(latest_payload["tasks"])
+            self.assertEqual(latest_payload["raw_context"]["workflow"], [
+                "observe",
+                "research",
+                "compare",
+                "diagnose",
+                "recommend",
+                "create_task",
+                "log",
+                "repeat",
+            ])
+            tasks_payload = json.loads((artifact_dir / "tasks_latest.json").read_text(encoding="utf-8"))
+            self.assertEqual(tasks_payload["workflow_step"], "create_task")
+            self.assertTrue(tasks_payload["tasks"])
+            log_record = json.loads((artifact_dir / "loop_log.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(log_record["workflow"][-2:], ["log", "repeat"])
+            self.assertGreater(log_record["task_count"], 0)
             self.assertIsNotNone(first.top_recommendation)
             self.assertEqual(second.summary, first.summary)
 

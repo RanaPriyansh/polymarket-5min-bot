@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -47,6 +48,19 @@ class ResearchInsight:
 
 
 @dataclass
+class ResearchTask:
+    task_id: str
+    title: str
+    status: str
+    priority: str
+    source: str
+    rationale: str
+    action: str
+    created_at: float
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ResearchCycleResult:
     cycle_id: str
     created_at: float
@@ -58,6 +72,7 @@ class ResearchCycleResult:
     hypotheses: List[ResearchHypothesis] = field(default_factory=list)
     experiments: List[ResearchExperimentResult] = field(default_factory=list)
     next_actions: List[str] = field(default_factory=list)
+    tasks: List[ResearchTask] = field(default_factory=list)
     top_recommendation: str | None = None
 
 
@@ -77,6 +92,8 @@ class ResearchLoop:
         self.retention_limit = retention_limit
         self.latest_json_path = self.artifact_dir / "latest.json"
         self.latest_md_path = self.artifact_dir / "latest.md"
+        self.tasks_latest_path = self.artifact_dir / "tasks_latest.json"
+        self.loop_log_path = self.artifact_dir / "loop_log.jsonl"
 
     def run_cycle(self, adapter: ResearchAdapter, *, runtime_dir: str | None = None) -> ResearchCycleResult:
         # Contradiction-first gate check (AC-5, AC-9)
@@ -124,6 +141,17 @@ class ResearchLoop:
         # Attach gate_state to the result for downstream consumers
         result.raw_context["gate_state"] = gate_state
         result.raw_context["gate_reasons"] = gate_reasons
+        result.raw_context["workflow"] = [
+            "observe",
+            "research",
+            "compare",
+            "diagnose",
+            "recommend",
+            "create_task",
+            "log",
+            "repeat",
+        ]
+        result.tasks = self._derive_tasks(result)
 
         payload = self._result_payload(result)
         markdown = self._to_markdown(result)
@@ -141,6 +169,8 @@ class ResearchLoop:
 
         self.latest_json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         self.latest_md_path.write_text(markdown, encoding="utf-8")
+        self._write_task_artifacts(result)
+        self._append_loop_log(result)
         return result
 
     def _result_payload(self, result: ResearchCycleResult) -> Dict[str, Any]:
@@ -148,6 +178,65 @@ class ResearchLoop:
         if result.context is not None:
             payload["context"] = asdict(result.context)
         return payload
+
+    def _derive_tasks(self, result: ResearchCycleResult) -> List[ResearchTask]:
+        tasks: List[ResearchTask] = []
+        insight_by_recommendation = {insight.recommendation: insight for insight in result.insights}
+        for idx, action in enumerate(result.next_actions, start=1):
+            normalized = " ".join(str(action).split())
+            if not normalized:
+                continue
+            digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+            insight = insight_by_recommendation.get(normalized)
+            source = "recommendation"
+            rationale = result.top_recommendation or result.summary
+            evidence: Dict[str, Any] = {}
+            if normalized.startswith("["):
+                source = "governance"
+                rationale = normalized
+            if insight is not None:
+                source = f"insight:{insight.title}"
+                rationale = insight.observation
+                evidence = insight.evidence
+            priority = "P0" if any(token in normalized.upper() for token in ["KILL", "GATE RED", "DEMOTE"]) else "P1"
+            tasks.append(
+                ResearchTask(
+                    task_id=f"research-task-{digest}",
+                    title=normalized[:96],
+                    status="open",
+                    priority=priority,
+                    source=source,
+                    rationale=rationale,
+                    action=normalized,
+                    created_at=result.created_at,
+                    evidence=evidence,
+                )
+            )
+        return tasks
+
+    def _write_task_artifacts(self, result: ResearchCycleResult) -> None:
+        payload = {
+            "cycle_id": result.cycle_id,
+            "created_at": result.created_at,
+            "workflow_step": "create_task",
+            "tasks": [asdict(task) for task in result.tasks],
+        }
+        self.tasks_latest_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _append_loop_log(self, result: ResearchCycleResult) -> None:
+        record = {
+            "cycle_id": result.cycle_id,
+            "created_at": result.created_at,
+            "workflow": result.raw_context.get("workflow", []),
+            "gate_state": result.raw_context.get("gate_state"),
+            "insight_count": len(result.insights),
+            "hypothesis_count": len(result.hypotheses),
+            "experiment_count": len(result.experiments),
+            "task_count": len(result.tasks),
+            "top_recommendation": result.top_recommendation,
+        }
+        with self.loop_log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
 
     def _to_markdown(self, result: ResearchCycleResult) -> str:
         lines = [
@@ -167,6 +256,10 @@ class ResearchLoop:
             lines.extend(["", "## Next actions"])
             for action in result.next_actions:
                 lines.append(f"- {action}")
+        if result.tasks:
+            lines.extend(["", "## Created tasks"])
+            for task in result.tasks:
+                lines.append(f"- [{task.priority}] {task.task_id}: {task.action}")
         if result.hypotheses:
             lines.extend(["", "## Hypotheses"])
             for idx, hypothesis in enumerate(result.hypotheses, start=1):
@@ -212,7 +305,14 @@ class ResearchLoop:
     def _timestamped_files(self, pattern: str) -> List[Path]:
         files = [
             path for path in self.artifact_dir.glob(pattern)
-            if path.name not in {"latest.json", "latest.md", "family_scoreboard.json", "bucket_scoreboard.json"}
+            if path.name not in {
+                "latest.json",
+                "latest.md",
+                "family_scoreboard.json",
+                "bucket_scoreboard.json",
+                "tasks_latest.json",
+                "loop_log.jsonl",
+            }
         ]
         return sorted(files, key=lambda p: p.stat().st_mtime)
 
