@@ -8,6 +8,12 @@ Type=oneshot
 WorkingDirectory=/root/obsidian-hermes-vault/projects/polymarket-5min-bot
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.env
-ExecStart=/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python /root/obsidian-hermes-vault/projects/polymarket-5min-bot/cli.py bakeoff --spec-path /root/obsidian-hermes-vault/projects/polymarket-5min-bot/configs/candidate-edge-bakeoff.yaml --python-bin /root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python --allow-candidate-trial
+ExecStart=/usr/bin/flock -n /run/polymarket-paper-ops.lock /root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python /root/obsidian-hermes-vault/projects/polymarket-5min-bot/cli.py bakeoff --spec-path /root/obsidian-hermes-vault/projects/polymarket-5min-bot/configs/candidate-edge-bakeoff.yaml --python-bin /root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python --allow-candidate-trial
+TimeoutStartSec=12min
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+MemoryMax=1G
+TasksMax=256
 StandardOutput=journal
 StandardError=journal

@@ -27,6 +27,7 @@ class BakeoffSpec:
     sleep_seconds: int
     runtime_root: str
     trials: list[BakeoffTrialSpec]
+    trial_timeout_seconds: int = 180
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,11 @@ def load_bakeoff_spec(path: str | Path) -> BakeoffSpec:
     if sleep_seconds < 0:
         raise ValueError("sleep_seconds must be greater than or equal to 0")
 
+    timeout_raw = payload.get("trial_timeout_seconds", 180)
+    trial_timeout_seconds = int(180 if timeout_raw is None else timeout_raw)
+    if trial_timeout_seconds <= 0:
+        raise ValueError("trial_timeout_seconds must be greater than 0")
+
     trials_payload = payload.get("trials") or []
     if not isinstance(trials_payload, list):
         raise ValueError("trials must be a list")
@@ -128,6 +134,7 @@ def load_bakeoff_spec(path: str | Path) -> BakeoffSpec:
         sleep_seconds=sleep_seconds,
         runtime_root=runtime_root,
         trials=trials,
+        trial_timeout_seconds=trial_timeout_seconds,
     )
 
 
@@ -384,6 +391,7 @@ def write_bakeoff_artifacts(
             "experiment_id": spec.experiment_id,
             "max_loops": spec.max_loops,
             "sleep_seconds": spec.sleep_seconds,
+            "trial_timeout_seconds": spec.trial_timeout_seconds,
             "runtime_root": spec.runtime_root,
             "trials": [{"family": trial.family, "label": trial.label} for trial in spec.trials],
         },

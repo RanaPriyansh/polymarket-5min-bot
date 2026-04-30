@@ -1,5 +1,5 @@
 [Unit]
-Description=Healthcheck and auto-heal Polymarket paper trading bot
+Description=ALERT-ONLY healthcheck for Polymarket paper trading bot (no restart/no revive)
 After=polymarket-paper-bot.service
 
 [Service]
@@ -7,6 +7,11 @@ Type=oneshot
 WorkingDirectory=/root/obsidian-hermes-vault/projects/polymarket-5min-bot
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.env
-ExecStart=/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python /root/obsidian-hermes-vault/projects/polymarket-5min-bot/scripts/paper_healthcheck.py --runtime-dir data/runtime --max-heartbeat-age 180
+ExecStart=/root/obsidian-hermes-vault/projects/polymarket-5min-bot/.venv/bin/python /root/obsidian-hermes-vault/projects/polymarket-5min-bot/scripts/paper_healthcheck.py --runtime-dir data/runtime --max-heartbeat-age 180 --no-restart
+TimeoutStartSec=60s
+NoNewPrivileges=true
+PrivateTmp=true
+MemoryMax=512M
+TasksMax=64
 StandardOutput=journal
 StandardError=journal

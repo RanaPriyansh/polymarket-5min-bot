@@ -1,22 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BOT_NAME="polymarket-paper-bot"
-RESEARCH_SERVICE="polymarket-paper-research.service"
-RESEARCH_TIMER="polymarket-paper-research.timer"
-SERVICE_DST="/etc/systemd/system/${BOT_NAME}.service"
-RESEARCH_SERVICE_DST="/etc/systemd/system/${RESEARCH_SERVICE}"
-RESEARCH_TIMER_DST="/etc/systemd/system/${RESEARCH_TIMER}"
+SYSTEMD_DIR="/etc/systemd/system"
+UNITS=(
+  polymarket-paper-bot.service
+  polymarket-paper-research.service
+  polymarket-paper-research.timer
+  polymarket-paper-bakeoff.service
+  polymarket-paper-bakeoff.timer
+  polymarket-paper-bot-healthcheck.service
+  polymarket-paper-bot-healthcheck.timer
+  polymarket-paper-ops-hourly.service
+  polymarket-paper-ops-hourly.timer
+)
+
+TIMERS=(
+  polymarket-paper-research.timer
+  polymarket-paper-bakeoff.timer
+  polymarket-paper-bot-healthcheck.timer
+  polymarket-paper-ops-hourly.timer
+)
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: Run as root (sudo bash deploy/systemd/uninstall.sh)" >&2
   exit 1
 fi
 
-systemctl stop "$RESEARCH_TIMER" 2>/dev/null || true
-systemctl disable "$RESEARCH_TIMER" 2>/dev/null || true
-systemctl stop "$BOT_NAME" 2>/dev/null || true
-systemctl disable "$BOT_NAME" 2>/dev/null || true
+for timer in "${TIMERS[@]}"; do
+  systemctl stop "$timer" 2>/dev/null || true
+  systemctl disable "$timer" 2>/dev/null || true
+done
+systemctl stop polymarket-paper-bot.service 2>/dev/null || true
+systemctl disable polymarket-paper-bot.service 2>/dev/null || true
 
 restore_or_remove() {
   local dst="$1"
@@ -29,9 +44,9 @@ restore_or_remove() {
   fi
 }
 
-restore_or_remove "$SERVICE_DST"
-restore_or_remove "$RESEARCH_SERVICE_DST"
-restore_or_remove "$RESEARCH_TIMER_DST"
+for unit in "${UNITS[@]}"; do
+  restore_or_remove "$SYSTEMD_DIR/$unit"
+done
 
 systemctl daemon-reload
-echo "Uninstall/rollback complete for $BOT_NAME and research timer"
+echo "Uninstall/rollback complete for Polymarket paper units"

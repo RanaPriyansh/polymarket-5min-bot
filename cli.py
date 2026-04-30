@@ -944,16 +944,27 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds, allow_candidate
     if state_violations and allow_candidate_trial:
         if mode != "paper" or not max_loops:
             raise click.ClickException("--allow-candidate-trial is only valid for bounded paper runs")
+        resolved_trial_runtime = _project_path(str(runtime_dir)).resolve()
+        experiments_root = (PROJECT_ROOT / "data" / "experiments").resolve()
+        try:
+            resolved_trial_runtime.relative_to(experiments_root)
+        except ValueError as exc:
+            raise click.ClickException(
+                "--allow-candidate-trial requires an isolated runtime under data/experiments; refusing to use "
+                f"{resolved_trial_runtime}"
+            ) from exc
         states = cfg.get("strategies", {}).get("states", {}) or {}
-        still_blocked = [
-            item for item in state_violations
-            if states.get(item.split(":", 1)[0]) not in {"candidate_only", "disabled"}
-        ]
+        candidates = {str(item) for item in cfg.get("strategies", {}).get("candidates", []) or []}
+        still_blocked = []
+        for item in state_violations:
+            family = item.split(":", 1)[0]
+            if family not in candidates or states.get(family) not in {"candidate_only", "disabled"}:
+                still_blocked.append(item)
         if still_blocked:
             raise click.ClickException(
                 "Refusing candidate trial for non-candidate strategies: " + ", ".join(still_blocked)
             )
-        click.echo("Candidate trial override: bounded paper bakeoff may activate candidate_only/disabled strategies")
+        click.echo("Candidate trial override: bounded isolated paper bakeoff may activate configured candidates")
         state_violations = []
     if state_violations:
         raise click.ClickException(
@@ -1786,7 +1797,12 @@ def bakeoff(spec_path, python_bin, dry_run, allow_candidate_trial):
                 cwd=str(PROJECT_ROOT),
                 capture_output=True,
                 text=True,
+                timeout=spec.trial_timeout_seconds,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise click.ClickException(
+                f"Trial timed out for {trial.family}: timeout={spec.trial_timeout_seconds}s command={shlex.join(command)}"
+            ) from exc
         except OSError as exc:
             raise click.ClickException(
                 f"Unable to launch trial subprocess for {trial.family}: command={shlex.join(command)} | error={exc}"

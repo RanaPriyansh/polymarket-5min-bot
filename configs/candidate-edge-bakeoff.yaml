@@ -1,6 +1,7 @@
 experiment_id: candidate-edge-bakeoff
 max_loops: 20
 sleep_seconds: 5
+trial_timeout_seconds: 180
 runtime_root: data/experiments/candidate-edge-bakeoff
 trials:
   - family: time_decay

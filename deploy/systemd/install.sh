@@ -3,36 +3,45 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BOT_NAME="polymarket-paper-bot"
-RESEARCH_SERVICE="polymarket-paper-research.service"
-RESEARCH_TIMER="polymarket-paper-research.timer"
+SYSTEMD_DIR="/etc/systemd/system"
 
-SERVICE_FILE="$REPO_ROOT/deploy/systemd/${BOT_NAME}.service"
-RESEARCH_SERVICE_FILE="$REPO_ROOT/deploy/systemd/${RESEARCH_SERVICE}"
-RESEARCH_TIMER_FILE="$REPO_ROOT/deploy/systemd/${RESEARCH_TIMER}"
+UNITS=(
+  polymarket-paper-bot.service
+  polymarket-paper-research.service
+  polymarket-paper-research.timer
+  polymarket-paper-bakeoff.service
+  polymarket-paper-bakeoff.timer
+  polymarket-paper-bot-healthcheck.service
+  polymarket-paper-bot-healthcheck.timer
+  polymarket-paper-ops-hourly.service
+  polymarket-paper-ops-hourly.timer
+)
 
-TARGET_SERVICE="/etc/systemd/system/${BOT_NAME}.service"
-TARGET_RESEARCH_SERVICE="/etc/systemd/system/${RESEARCH_SERVICE}"
-TARGET_RESEARCH_TIMER="/etc/systemd/system/${RESEARCH_TIMER}"
+ENABLED_TIMERS=(
+  polymarket-paper-research.timer
+  polymarket-paper-bakeoff.timer
+  polymarket-paper-ops-hourly.timer
+)
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: run as root (sudo bash deploy/systemd/install.sh)" >&2
   exit 1
 fi
 
-for file in "$SERVICE_FILE" "$RESEARCH_SERVICE_FILE" "$RESEARCH_TIMER_FILE"; do
-  if [ ! -f "$file" ]; then
-    echo "ERROR: required systemd asset missing: $file" >&2
-    exit 1
-  fi
-done
-
-mkdir -p "$REPO_ROOT/data/runtime" "$REPO_ROOT/data/research"
-
 if [ ! -x "$REPO_ROOT/.venv/bin/python" ]; then
   echo "ERROR: missing virtualenv python at $REPO_ROOT/.venv/bin/python" >&2
   exit 1
 fi
+
+for unit in "${UNITS[@]}"; do
+  src="$REPO_ROOT/deploy/systemd/$unit"
+  if [ ! -f "$src" ]; then
+    echo "ERROR: required systemd asset missing: $src" >&2
+    exit 1
+  fi
+done
+
+mkdir -p "$REPO_ROOT/data/runtime" "$REPO_ROOT/data/research" "$REPO_ROOT/data/experiments"
 
 backup_if_present() {
   local src="$1"
@@ -42,43 +51,32 @@ backup_if_present() {
   fi
 }
 
-backup_if_present "$TARGET_SERVICE"
-backup_if_present "$TARGET_RESEARCH_SERVICE"
-backup_if_present "$TARGET_RESEARCH_TIMER"
+for unit in "${UNITS[@]}"; do
+  dst="$SYSTEMD_DIR/$unit"
+  backup_if_present "$dst"
+  cp "$REPO_ROOT/deploy/systemd/$unit" "$dst"
+  chmod 644 "$dst"
+done
 
-cp "$SERVICE_FILE" "$TARGET_SERVICE"
-cp "$RESEARCH_SERVICE_FILE" "$TARGET_RESEARCH_SERVICE"
-cp "$RESEARCH_TIMER_FILE" "$TARGET_RESEARCH_TIMER"
-chmod 644 "$TARGET_SERVICE" "$TARGET_RESEARCH_SERVICE" "$TARGET_RESEARCH_TIMER"
-
+systemd-analyze verify "${UNITS[@]/#/$SYSTEMD_DIR/}"
 systemctl daemon-reload
-systemctl enable "$BOT_NAME"
-systemctl restart "$BOT_NAME"
-systemctl enable --now "$RESEARCH_TIMER"
+systemctl enable polymarket-paper-bot.service
+systemctl restart polymarket-paper-bot.service
+for timer in "${ENABLED_TIMERS[@]}"; do
+  systemctl enable --now "$timer"
+done
+# Healthcheck is intentionally alert-only and not auto-enabled unless explicitly requested.
+systemctl disable polymarket-paper-bot-healthcheck.timer 2>/dev/null || true
 
-echo
-echo "=== systemd status ==="
-systemctl status "$BOT_NAME" --no-pager
+printf '\n=== systemd status ===\n'
+systemctl status polymarket-paper-bot.service --no-pager
 
-echo
-echo "=== unit verification ==="
-systemctl show "$BOT_NAME" -p ExecStart -p WorkingDirectory -p Restart -p RestartUSec --no-pager
+printf '\n=== enabled timers ===\n'
+systemctl list-timers 'polymarket-paper-*' --all --no-pager
 
-echo
-echo "=== research timer ==="
-systemctl status "$RESEARCH_TIMER" --no-pager
-systemctl list-timers "$RESEARCH_TIMER" --no-pager
+printf '\n=== unit verification ===\n'
+systemctl show polymarket-paper-bot.service -p ExecStart -p WorkingDirectory -p Restart -p RestartPreventExitStatus --no-pager
+systemctl show polymarket-paper-research.service polymarket-paper-bakeoff.service -p ExecStart -p TimeoutStartUSec -p RuntimeMaxUSec --no-pager
 
-echo
-echo "=== recent bot logs ==="
-journalctl -u "$BOT_NAME" -n 30 --no-pager
-
-echo
-echo "=== recent research logs ==="
-journalctl -u polymarket-paper-research.service -n 30 --no-pager || true
-
-echo
-echo "Follow bot logs: journalctl -u $BOT_NAME -f"
-echo "Follow research logs: journalctl -u polymarket-paper-research.service -f"
-echo "Rollback bot: cp $TARGET_SERVICE.bak $TARGET_SERVICE && systemctl daemon-reload && systemctl restart $BOT_NAME"
-echo "Rollback research: cp $TARGET_RESEARCH_SERVICE.bak $TARGET_RESEARCH_SERVICE; cp $TARGET_RESEARCH_TIMER.bak $TARGET_RESEARCH_TIMER; systemctl daemon-reload && systemctl restart $BOT_NAME && systemctl restart $RESEARCH_TIMER"
+printf '\nFollow bot logs: journalctl -u polymarket-paper-bot.service -f\n'
+printf 'Rollback: copy *.bak files in /etc/systemd/system back into place, then systemctl daemon-reload\n'

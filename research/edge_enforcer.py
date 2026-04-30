@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -27,6 +30,7 @@ class EdgeDecision:
 DEFAULT_POLICY = {
     "enabled": True,
     "operator_approved_paper_auto_activation": True,
+    "allow_auto_demotion": True,
     "require_gate_green": True,
     "max_active_strategies": 1,
     "min_settled_trades": PROMOTE_IF["settled_trades_>="],
@@ -55,6 +59,36 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _stable_json_hash(payload: Any) -> str:
+    return _sha256_bytes(json.dumps(payload, sort_keys=True, default=str).encode("utf-8"))
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+        try:
+            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def edge_policy(config: dict[str, Any]) -> dict[str, Any]:
@@ -111,6 +145,12 @@ def _risk_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _can_promote_family(config: dict[str, Any], family: str) -> bool:
+    # Scanner-only and disabled families may appear in research candidates, but
+    # only candidate_only strategies are executable promotion targets.
+    return family in _candidate_families(config) and _state(config, family) == "candidate_only"
+
+
 def build_edge_decisions(
     *,
     config: dict[str, Any],
@@ -121,22 +161,13 @@ def build_edge_decisions(
     policy = edge_policy(config)
     rows = list(scoreboard_rows)
     active = set(_active_families(config))
-    candidates = _candidate_families(config)
     decisions: list[EdgeDecision] = []
 
     if not bool(policy.get("enabled", True)):
         return [EdgeDecision("__policy__", "noop", "edge_enforcement_disabled", {"policy": policy})]
-    if bool(policy.get("require_gate_green", True)) and gate_state != "GREEN":
-        return [
-            EdgeDecision(
-                "__gate__",
-                "block",
-                f"gate_not_green:{gate_state}",
-                {"gate_state": gate_state, "gate_reasons": gate_reasons or []},
-            )
-        ]
 
-    # Demotion dominates promotion. Bad settled evidence is a stop sign, not a debate.
+    # Demotion dominates promotion and is allowed even when the research gate is
+    # YELLOW/RED. Bad settled evidence is risk reduction, not activation.
     for row in rows:
         family = str(row.get("family") or "")
         if not family:
@@ -151,6 +182,17 @@ def build_edge_decisions(
                 )
             )
 
+    if bool(policy.get("require_gate_green", True)) and gate_state != "GREEN":
+        decisions.append(
+            EdgeDecision(
+                "__gate__",
+                "block",
+                f"gate_not_green:{gate_state}",
+                {"gate_state": gate_state, "gate_reasons": gate_reasons or []},
+            )
+        )
+        return decisions
+
     existing_survivors = [f for f in _active_families(config) if not any(d.family == f and d.action == "demote" for d in decisions)]
     max_active = max(0, _as_int(policy.get("max_active_strategies"), 1))
     open_slots = max(0, max_active - len(existing_survivors))
@@ -160,7 +202,7 @@ def build_edge_decisions(
     promotable = [
         row
         for row in rows
-        if str(row.get("family") or "") in candidates | active
+        if _can_promote_family(config, str(row.get("family") or ""))
         and str(row.get("family") or "") not in existing_survivors
         and _promotable(row, policy)
     ]
@@ -199,6 +241,17 @@ def apply_edge_decisions(config: dict[str, Any], decisions: Iterable[EdgeDecisio
             states[decision.family] = "disabled"
             applied.append(EdgeDecision(decision.family, decision.action, decision.reason, decision.evidence, True))
         elif decision.action == "promote_to_paper_active":
+            if not _can_promote_family(config, decision.family):
+                applied.append(
+                    EdgeDecision(
+                        decision.family,
+                        "blocked_promotion",
+                        "family_not_candidate_only",
+                        decision.evidence,
+                        False,
+                    )
+                )
+                continue
             states[decision.family] = "paper_active"
             if decision.family not in active:
                 active.append(decision.family)
@@ -215,6 +268,16 @@ def apply_edge_decisions(config: dict[str, Any], decisions: Iterable[EdgeDecisio
     return updated, applied
 
 
+def _candidate_evidence_gap(config: dict[str, Any], scoreboard_rows: Iterable[dict[str, Any]], policy: dict[str, Any]) -> list[str]:
+    rows_by_family = {str(row.get("family")): row for row in scoreboard_rows if row.get("family")}
+    gap = []
+    for family in sorted(_candidate_families(config)):
+        row = rows_by_family.get(family)
+        if row is None or _as_int(row.get("settled_trades")) < _as_int(policy.get("min_settled_trades")):
+            gap.append(family)
+    return gap
+
+
 def enforce_research_edges(
     *,
     config_path: str | Path,
@@ -225,7 +288,8 @@ def enforce_research_edges(
     config_path = Path(config_path)
     artifact_dir = Path(artifact_dir)
     runtime_dir = Path(runtime_dir)
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    config_bytes = config_path.read_bytes()
+    config = yaml.safe_load(config_bytes.decode("utf-8")) or {}
     policy = edge_policy(config)
     gate_state, gate_reasons = compute_gate_state(build_gate_inputs(runtime_dir))
     scoreboard = _read_json(artifact_dir / "family_scoreboard.json", [])
@@ -238,19 +302,27 @@ def enforce_research_edges(
     applied_decisions = decisions
     updated_config = config
     apply_blocked_reason = None
-    if apply and bool(policy.get("enabled", True)):
-        if not bool(policy.get("operator_approved_paper_auto_activation", False)):
-            apply_blocked_reason = "operator_approval_missing"
-        elif any(decision.action in {"demote", "promote_to_paper_active"} for decision in decisions):
-            updated_config, applied_decisions = apply_edge_decisions(config, decisions)
-            config_path.write_text(yaml.safe_dump(updated_config, sort_keys=False), encoding="utf-8")
 
-    candidates_without_evidence = [
-        str(row.get("family"))
-        for row in scoreboard
-        if str(row.get("family") or "") in _candidate_families(config)
-        and _as_int(row.get("settled_trades")) < _as_int(policy.get("min_settled_trades"))
-    ]
+    if apply and bool(policy.get("enabled", True)):
+        demotions = [decision for decision in decisions if decision.action == "demote"]
+        promotions = [decision for decision in decisions if decision.action == "promote_to_paper_active"]
+        apply_decisions: list[EdgeDecision] = []
+        if demotions and bool(policy.get("allow_auto_demotion", True)):
+            apply_decisions.extend(demotions)
+        elif demotions:
+            apply_blocked_reason = "auto_demotion_disabled"
+        if promotions:
+            if bool(policy.get("operator_approved_paper_auto_activation", False)):
+                apply_decisions.extend(promotions)
+            else:
+                apply_blocked_reason = "operator_approval_missing"
+        if apply_decisions:
+            updated_config, applied_decisions = apply_edge_decisions(config, apply_decisions)
+            _atomic_write_text(config_path, yaml.safe_dump(updated_config, sort_keys=False))
+        elif promotions or demotions:
+            applied_decisions = decisions
+
+    candidates_without_evidence = _candidate_evidence_gap(config, scoreboard, policy)
     payload = {
         "created_at": time.time(),
         "config_path": str(config_path),
@@ -267,10 +339,12 @@ def enforce_research_edges(
         "candidate_evidence_gap": candidates_without_evidence,
         "next_experiment": "run_bakeoff" if candidates_without_evidence else None,
         "risk_constraints_unchanged": _risk_fingerprint(config) == _risk_fingerprint(updated_config),
+        "config_hash_before": _sha256_bytes(config_bytes),
+        "config_hash_after": _stable_json_hash(updated_config),
+        "decision_hash": _stable_json_hash([decision.to_dict() for decision in applied_decisions]),
     }
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    (artifact_dir / "edge_enforcement_latest.json").write_text(
+    _atomic_write_text(
+        artifact_dir / "edge_enforcement_latest.json",
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
     return payload
