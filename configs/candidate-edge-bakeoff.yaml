@@ -1,0 +1,13 @@
+experiment_id: candidate-edge-bakeoff
+max_loops: 20
+sleep_seconds: 5
+runtime_root: data/experiments/candidate-edge-bakeoff
+trials:
+  - family: time_decay
+    label: baseline
+  - family: mean_reversion_5min
+    label: mean_reversion_5min
+  - family: opening_range
+    label: opening_range
+  - family: spot_momentum
+    label: spot_momentum

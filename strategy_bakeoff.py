@@ -144,8 +144,9 @@ def build_trial_command(
     sleep_seconds: int,
     cli_path: str = str(Path(__file__).resolve().parent / "cli.py"),
     mode: str = "paper",
+    allow_candidate_trial: bool = False,
 ) -> list[str]:
-    return [
+    command = [
         str(python_bin),
         cli_path,
         "run",
@@ -160,6 +161,9 @@ def build_trial_command(
         "--sleep-seconds",
         str(int(sleep_seconds)),
     ]
+    if allow_candidate_trial:
+        command.append("--allow-candidate-trial")
+    return command
 
 
 def collect_trial_outcome(

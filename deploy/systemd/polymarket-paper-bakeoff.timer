@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Polymarket candidate strategy bakeoff every 30 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=30min
+Persistent=false
+Unit=polymarket-paper-bakeoff.service
+
+[Install]
+WantedBy=timers.target

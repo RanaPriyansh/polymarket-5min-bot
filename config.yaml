@@ -69,6 +69,7 @@ strategies:
   promotion_requires_human_approval: true
   allow_unapproved_activation: false
   candidates:
+  - time_decay
   - mean_reversion_5min
   - opening_range
   - spot_momentum
@@ -140,5 +141,15 @@ research:
   bucket_pause_enabled: true
   bucket_pause_warn_only: false
   bucket_pause_min_settled_trades: 20
+  edge_enforcement:
+    enabled: true
+    operator_approved_paper_auto_activation: true
+    require_gate_green: true
+    max_active_strategies: 1
+    min_settled_trades: 30
+    min_win_rate: 0.45
+    min_pnl_per_trade: 0.05
+    demote_settled_trades: 20
+    demote_pnl_per_trade_below: -0.20
 telegram:
   enabled: false

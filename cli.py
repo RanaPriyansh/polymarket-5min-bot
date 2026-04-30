@@ -25,6 +25,7 @@ from baseline_evidence import build_baseline_evidence, render_baseline_evidence_
 from evidence_mart import build_evidence_mart, build_evidence_rows, family_performance, markout_vs_settlement, tte_performance
 from execution import resolve_directional_signal_entry_style
 from notification_governor import NotificationGovernor, build_readable_digest
+from research.edge_enforcer import enforce_research_edges
 from research.gate import build_gate_inputs, compute_gate_state
 from research.loop import ResearchLoop
 from research.polymarket import PolymarketRuntimeResearchAdapter
@@ -919,7 +920,8 @@ def _detect_prior_run_id(ledger_db_path: str) -> "tuple[str | None, float | None
 @click.option("--max-loops", type=int, default=0, help="Bounded loop count for smoke tests")
 @click.option("--runtime-dir", default="data/runtime", help="Directory for durable runtime telemetry")
 @click.option("--sleep-seconds", type=int, default=15, help="Loop sleep duration")
-def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
+@click.option("--allow-candidate-trial", is_flag=True, default=False, help="Permit candidate_only strategies for bounded isolated paper bakeoff trials")
+def run(mode, strategies, max_loops, runtime_dir, sleep_seconds, allow_candidate_trial):
     """Run the trading bot in specified mode."""
     from execution import PolymarketExecutor
     from tradeability_policy import assess_tradeability
@@ -939,6 +941,20 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds):
     cfg = load_cfg()
     active_strategies = _resolve_active_strategies(cfg, strategies)
     state_violations = validate_active_strategy_states(cfg, active_strategies)
+    if state_violations and allow_candidate_trial:
+        if mode != "paper" or not max_loops:
+            raise click.ClickException("--allow-candidate-trial is only valid for bounded paper runs")
+        states = cfg.get("strategies", {}).get("states", {}) or {}
+        still_blocked = [
+            item for item in state_violations
+            if states.get(item.split(":", 1)[0]) not in {"candidate_only", "disabled"}
+        ]
+        if still_blocked:
+            raise click.ClickException(
+                "Refusing candidate trial for non-candidate strategies: " + ", ".join(still_blocked)
+            )
+        click.echo("Candidate trial override: bounded paper bakeoff may activate candidate_only/disabled strategies")
+        state_violations = []
     if state_violations:
         raise click.ClickException(
             "Refusing to activate strategies without paper_active state and approval: "
@@ -1733,7 +1749,8 @@ def analyze_markout_vs_settlement_cmd(runtime_dir, run_id):
 @click.option("--spec-path", default="configs/strategy-bakeoff.yaml", help="Bakeoff YAML spec path")
 @click.option("--python-bin", default=".venv/bin/python", help="Python interpreter used for trial subprocesses")
 @click.option("--dry-run/--no-dry-run", default=False, help="Print commands without executing bounded runs")
-def bakeoff(spec_path, python_bin, dry_run):
+@click.option("--allow-candidate-trial", is_flag=True, default=False, help="Allow candidate_only strategies in bounded trial subprocesses")
+def bakeoff(spec_path, python_bin, dry_run, allow_candidate_trial):
     """Run bounded isolated strategy family trials and emit one summary packet."""
     spec = load_bakeoff_spec(spec_path)
     experiment_dir = Path(spec.runtime_root)
@@ -1750,6 +1767,7 @@ def bakeoff(spec_path, python_bin, dry_run):
             max_loops=spec.max_loops,
             sleep_seconds=spec.sleep_seconds,
             cli_path=str(CLI_SCRIPT_PATH),
+            allow_candidate_trial=allow_candidate_trial,
         )
         click.echo(f"- {trial.family}: {shlex.join(command)}")
         if dry_run:
@@ -1811,20 +1829,35 @@ def bakeoff(spec_path, python_bin, dry_run):
 @click.option("--runtime-dir", default="data/runtime", help="Directory containing live runtime artifacts")
 @click.option("--artifact-dir", default="data/research", help="Directory to write research outputs")
 @click.option("--sample-limit", default=200, help="How many market samples to analyze")
-def research(runtime_dir, artifact_dir, sample_limit):
+@click.option("--enforce-edges/--no-enforce-edges", default=False, help="Apply safe research edge decisions to paper config")
+def research(runtime_dir, artifact_dir, sample_limit, enforce_edges):
     """Run autoresearch on live runtime artifacts, scoped to the current run by default."""
-    telemetry = RuntimeTelemetry(runtime_dir)
+    resolved_runtime_dir = _project_path(str(runtime_dir))
+    resolved_artifact_dir = _project_path(str(artifact_dir))
+    telemetry = RuntimeTelemetry(resolved_runtime_dir)
     adapter = PolymarketRuntimeResearchAdapter(
-        runtime_dir,
+        resolved_runtime_dir,
         sample_limit=sample_limit,
         run_id=telemetry.current_run_id(),
     )
-    loop = ResearchLoop(artifact_dir)
-    result = loop.run_cycle(adapter, runtime_dir=runtime_dir)
+    loop = ResearchLoop(resolved_artifact_dir)
+    result = loop.run_cycle(adapter, runtime_dir=str(resolved_runtime_dir))
     click.echo(result.summary)
     for insight in result.insights:
         click.echo(f"- {insight.title}: {insight.recommendation} [{insight.confidence:.0%}]")
-    click.echo(f"Artifacts written to {artifact_dir}/{result.cycle_id}.json and .md")
+    if enforce_edges:
+        enforcement = enforce_research_edges(
+            config_path=CONFIG_PATH,
+            runtime_dir=resolved_runtime_dir,
+            artifact_dir=resolved_artifact_dir,
+            apply=True,
+        )
+        click.echo(
+            "Edge enforcement: gate={gate_state} active_after={active_after} next_experiment={next_experiment}".format(
+                **enforcement
+            )
+        )
+    click.echo(f"Artifacts written to {resolved_artifact_dir}/{result.cycle_id}.json and .md")
 
 
 if __name__ == "__main__":
