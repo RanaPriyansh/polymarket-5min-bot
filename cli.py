@@ -1475,27 +1475,54 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds, allow_candidate
 
                     risk_stop_reason = risk_mgr.circuit_breaker_reason(risk_report)
                     if risk_stop_reason:
-                        stop_reason = risk_stop_reason
-                        persist_runtime_risk_stop(
-                            runtime,
-                            runtime_dir,
-                            run_id=run_id,
-                            mode=mode,
-                            loop_count=loop_count,
-                            stop_reason=stop_reason,
-                            risk_report=risk_report,
-                            gate_snapshot=gate_snapshot,
+                        paper_continue_after_risk_stop = (
+                            mode == "paper"
+                            and bool(cfg.get("risk", {}).get("paper_continue_after_risk_stop", False))
                         )
-                        runtime.append_event("runtime.circuit_breaker", {"run_id": run_id, "risk": risk_report})
-                        evidence_manifest = runtime.preserve_run_evidence(trigger=stop_reason, run_id=run_id)
-                        stop_snapshot_dir = str(evidence_manifest["snapshot_dir"])
-                        runtime.append_event(
-                            "runtime.evidence_preserved",
-                            {"run_id": run_id, "trigger": stop_reason, "snapshot_dir": stop_snapshot_dir},
-                        )
-                        click.echo(f"Preserved stop evidence at {stop_snapshot_dir}")
-                        click.echo(f"RISK STOP TRIGGERED ({stop_reason}) — stopping trading")
-                        break
+                        if paper_continue_after_risk_stop:
+                            runtime.append_event(
+                                "runtime.paper_risk_stop_observed_continue",
+                                {"run_id": run_id, "risk_stop_reason": risk_stop_reason, "risk": risk_report},
+                            )
+                            runtime.update_status(
+                                run_id=run_id,
+                                phase="running",
+                                mode=mode,
+                                loop_count=loop_count,
+                                risk=risk_report,
+                                paper_risk_stop_override=True,
+                                last_observed_risk_stop_reason=risk_stop_reason,
+                                new_order_pause=False,
+                                new_orders_paused=False,
+                                pause_policy="paper_continue_after_risk_stop",
+                                pause_scope="none",
+                                pause_reason="paper_exploration_mode",
+                            )
+                            click.echo(
+                                f"PAPER RISK STOP OBSERVED ({risk_stop_reason}) — continuing paper exploration; live mode would stop"
+                            )
+                        else:
+                            stop_reason = risk_stop_reason
+                            persist_runtime_risk_stop(
+                                runtime,
+                                runtime_dir,
+                                run_id=run_id,
+                                mode=mode,
+                                loop_count=loop_count,
+                                stop_reason=stop_reason,
+                                risk_report=risk_report,
+                                gate_snapshot=gate_snapshot,
+                            )
+                            runtime.append_event("runtime.circuit_breaker", {"run_id": run_id, "risk": risk_report})
+                            evidence_manifest = runtime.preserve_run_evidence(trigger=stop_reason, run_id=run_id)
+                            stop_snapshot_dir = str(evidence_manifest["snapshot_dir"])
+                            runtime.append_event(
+                                "runtime.evidence_preserved",
+                                {"run_id": run_id, "trigger": stop_reason, "snapshot_dir": stop_snapshot_dir},
+                            )
+                            click.echo(f"Preserved stop evidence at {stop_snapshot_dir}")
+                            click.echo(f"RISK STOP TRIGGERED ({stop_reason}) — stopping trading")
+                            break
 
                     if max_loops and loop_count >= max_loops:
                         stop_reason = "max_loops"

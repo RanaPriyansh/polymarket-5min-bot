@@ -332,7 +332,12 @@ class ConservativeFillEngine:
 
     @staticmethod
     def _queue_ahead(order: dict[str, Any], snapshot: OrderBookSnapshot) -> float:
-        return max(0.0, float(order.get("queue_ahead_shares", snapshot.queue_ahead_shares)))
+        queue_ahead = order.get("queue_ahead_shares")
+        if queue_ahead is None:
+            queue_ahead = snapshot.queue_ahead_shares
+        if queue_ahead is None:
+            queue_ahead = 0.0
+        return max(0.0, float(queue_ahead))
 
     def _queue_consumed(self, order: dict[str, Any], snapshot: OrderBookSnapshot) -> bool:
         visible_consumed = max(float(snapshot.level_consumed_size), float(snapshot.last_trade_size))

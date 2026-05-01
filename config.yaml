@@ -25,6 +25,9 @@ risk:
   max_daily_loss: 0.01
   max_position_size: 0.03
   max_risk_per_trade_usd: 2
+  # Paper-only exploration mode: keep collecting trade evidence after a paper
+  # risk stop would have fired. Live mode still obeys hard stops.
+  paper_continue_after_risk_stop: true
 filters:
   max_book_spread_bps: 500
   min_top_depth: 2
@@ -53,17 +56,21 @@ execution:
     max_ws_lag_ms: 1000
     cancel_latency_ms: 250
 strategies:
-  # Human-approved exploratory paper-active mode (2026-04-30): run one bounded
-  # candidate under unchanged risk constraints while autoresearch can still demote it.
+  # Human-approved exploratory paper-active mode (2026-05-01): run multiple
+  # bounded paper strategies across all configured 5/15m markets to collect
+  # edge evidence. PAPER ONLY; live mode still requires separate approval.
   active:
   - time_decay
+  - mean_reversion_5min
+  - opening_range
+  - spot_momentum
   states:
     toxicity_mm: disabled
     toxicity_mm_v2: scanner_only
     time_decay: paper_active
-    mean_reversion_5min: candidate_only
-    opening_range: candidate_only
-    spot_momentum: candidate_only
+    mean_reversion_5min: paper_active
+    opening_range: paper_active
+    spot_momentum: paper_active
     terminal_fair_value: scanner_only
     lag_scanner: scanner_only
     complement_dislocation: scanner_only
@@ -146,7 +153,7 @@ research:
     enabled: true
     operator_approved_paper_auto_activation: true
     require_gate_green: true
-    max_active_strategies: 1
+    max_active_strategies: 4
     min_settled_trades: 30
     min_win_rate: 0.45
     min_pnl_per_trade: 0.05
