@@ -47,6 +47,7 @@ execution:
     spot_momentum: 5
     opening_range: 10
     mean_reversion_5min: 10
+    market_open_probe: 10
   fill_policy:
     min_rest_seconds: 1.0
     max_fill_fraction_per_snapshot: 0.25
@@ -60,6 +61,7 @@ strategies:
   # bounded paper strategies across all configured 5/15m markets to collect
   # edge evidence. PAPER ONLY; live mode still requires separate approval.
   active:
+  - market_open_probe
   - time_decay
   - mean_reversion_5min
   - opening_range
@@ -71,12 +73,14 @@ strategies:
     mean_reversion_5min: paper_active
     opening_range: paper_active
     spot_momentum: paper_active
+    market_open_probe: paper_active
     terminal_fair_value: scanner_only
     lag_scanner: scanner_only
     complement_dislocation: scanner_only
   promotion_requires_human_approval: true
   allow_unapproved_activation: false
   candidates:
+  - market_open_probe
   - time_decay
   - mean_reversion_5min
   - opening_range
@@ -143,6 +147,16 @@ strategies:
     move_notional_multiplier: 4.0
     max_notional_usd: 6.0
     directional_signal_entry_style: resting_limit
+  market_open_probe:
+    # PAPER ONLY: one tiny marketable probe in every open 5m/15m market when no
+    # other strategy already has exposure. Labels data for autoresearch rather
+    # than pretending this is proven alpha.
+    notional_usd: 1.0
+    min_entry_price: 0.02
+    max_entry_price: 0.98
+    spot_move_threshold_pct: 0.02
+    directional_signal_entry_style: marketable
+    min_seconds_to_expiry_for_new_orders: 0
 runtime:
   dir: data/runtime
 research:
@@ -153,7 +167,7 @@ research:
     enabled: true
     operator_approved_paper_auto_activation: true
     require_gate_green: true
-    max_active_strategies: 4
+    max_active_strategies: 5
     min_settled_trades: 30
     min_win_rate: 0.45
     min_pnl_per_trade: 0.05

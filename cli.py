@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, Iterable, List
 
 import click
@@ -24,6 +25,7 @@ import yaml
 from baseline_evidence import build_baseline_evidence, render_baseline_evidence_text
 from evidence_mart import build_evidence_mart, build_evidence_rows, family_performance, markout_vs_settlement, tte_performance
 from execution import resolve_directional_signal_entry_style
+from market_data import PolymarketData
 from notification_governor import NotificationGovernor, build_readable_digest
 from research.edge_enforcer import enforce_research_edges
 from research.gate import build_gate_inputs, compute_gate_state
@@ -550,11 +552,58 @@ def _bounded_directional_signal_size(risk_mgr, strategy_family: str, signal, ref
     return min(requested_size, bounded.size) if bounded.size > 0 else 0.0
 
 
+def _paper_market_open_probe_signal(cfg: dict, market: Dict, orderbook, market_context, loop_count: int):
+    """Paper-only exploratory signal: take one bounded probe in every open interval market.
+
+    This is deliberately scoped to paper mode by the caller. It is not an alpha claim;
+    it is an evidence collection primitive so autoresearch can observe every 5m/15m slot.
+    """
+    params = ((cfg.get("strategies", {}) or {}).get("market_open_probe", {}) or {})
+    outcomes = list(market.get("outcomes") or [])
+    if not outcomes:
+        return None
+    up = outcomes[0]
+    down = outcomes[1] if len(outcomes) > 1 else up
+    spot_move = float(getattr(market_context, "spot_move_pct_window", 0.0) or 0.0)
+    threshold = float(params.get("spot_move_threshold_pct", 0.02))
+    if spot_move > threshold:
+        outcome = up
+        direction_reason = f"spot_up_{spot_move:.3f}%"
+    elif spot_move < -threshold:
+        outcome = down
+        direction_reason = f"spot_down_{spot_move:.3f}%"
+    else:
+        outcome = up if loop_count % 2 == 0 else down
+        direction_reason = f"flat_spot_alternate_{spot_move:.3f}%"
+
+    best_ask = PolymarketData.best_ask(orderbook, outcome)
+    if best_ask <= 0:
+        return None
+    max_entry_price = float(params.get("max_entry_price", 0.98))
+    min_entry_price = float(params.get("min_entry_price", 0.02))
+    if best_ask > max_entry_price or best_ask < min_entry_price:
+        return None
+    notional = float(params.get("notional_usd", 1.0))
+    confidence = max(0.05, min(1.0, abs(spot_move) / max(threshold, 0.001)))
+    return SimpleNamespace(
+        market_id=market["id"],
+        outcome=outcome,
+        action="BUY",
+        price=round(float(best_ask), 4),
+        confidence=confidence,
+        size=round(notional / max(float(best_ask), 0.01), 4),
+        reason=(
+            f"paper_market_open_probe:{direction_reason}; "
+            f"asset={market.get('asset')} interval={market.get('interval_minutes')}m"
+        ),
+    )
+
+
 def _mark_directional_fired_on_fill(fill: Dict, *, time_decay=None, spot_momentum=None, opening_range=None) -> Dict | None:
     if fill.get("order_kind") != "signal":
         return None
     family = str(fill.get("strategy_family") or "")
-    if family not in {"mean_reversion_5min", "opening_range", "time_decay", "spot_momentum"}:
+    if family not in {"mean_reversion_5min", "opening_range", "time_decay", "spot_momentum", "market_open_probe"}:
         return None
     slot_id = fill.get("slot_id")
     outcome = fill.get("outcome")
@@ -1270,6 +1319,27 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds, allow_candidate
                                         f"SPOT MOMENTUM: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
                                     )
                                     result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="spot_momentum")
+                                    _emit_events(runtime, result.get("events", []), run_id=run_id)
+                                    if result.get("filled"):
+                                        fired_fill = _filled_event_from_execution_result(result)
+                                        fired_event = _mark_directional_fired_on_fill(fired_fill or result, time_decay=time_decay, spot_momentum=spot_momentum, opening_range=opening_range)
+                                        if fired_event:
+                                            runtime.append_event(fired_event.pop("event_type"), fired_event, run_id=run_id)
+
+                        if mode == "paper" and "market_open_probe" in active_strategies and not executor._market_has_open_exposure(market_id):
+                            signal = _paper_market_open_probe_signal(cfg, market, orderbook, market_context, loop_count)
+                            if signal:
+                                signal.size = _bounded_directional_signal_size(
+                                    risk_mgr,
+                                    "market_open_probe",
+                                    signal,
+                                    reference_price=max(signal.price, 0.01),
+                                )
+                                if signal.size > 0:
+                                    click.echo(
+                                        f"MARKET OPEN PROBE: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
+                                    )
+                                    result = await executor.execute_signal_trade(market, orderbook, signal, strategy_family="market_open_probe")
                                     _emit_events(runtime, result.get("events", []), run_id=run_id)
                                     if result.get("filled"):
                                         fired_fill = _filled_event_from_execution_result(result)
