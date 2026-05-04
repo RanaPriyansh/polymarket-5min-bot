@@ -552,6 +552,93 @@ def _bounded_directional_signal_size(risk_mgr, strategy_family: str, signal, ref
     return min(requested_size, bounded.size) if bounded.size > 0 else 0.0
 
 
+def _terminal_fair_value_signal_from_decisions(cfg: dict, market: Dict, decisions: Iterable[object]):
+    """Convert scanner-only terminal fair-value decisions into one bounded paper signal.
+
+    This is deliberately taker/edge conservative: activate only when model fair
+    exceeds the executable ask by a configured edge, choose the largest edge,
+    and cap notional before the risk manager applies its own bound.
+    """
+    params = ((cfg.get("strategies", {}) or {}).get("terminal_fair_value", {}) or {})
+    decisions = list(decisions or [])
+    if not decisions:
+        return None
+    min_edge = float(params.get("min_active_edge", params.get("min_taker_edge", 0.08)))
+    max_entry_price = float(params.get("max_entry_price", 0.85))
+    min_entry_price = float(params.get("min_entry_price", 0.01))
+    candidates = []
+    for decision in decisions:
+        edge = float(getattr(decision, "model_edge", 0.0) or 0.0)
+        price = float(getattr(decision, "best_ask", getattr(decision, "price", 0.0)) or 0.0)
+        if edge < min_edge:
+            continue
+        if price < min_entry_price or price > max_entry_price:
+            continue
+        candidates.append(decision)
+    if not candidates:
+        return None
+
+    decision = max(candidates, key=lambda item: float(getattr(item, "model_edge", 0.0) or 0.0))
+    edge = float(getattr(decision, "model_edge", 0.0) or 0.0)
+    price = round(float(getattr(decision, "best_ask", getattr(decision, "price", 0.0)) or 0.0), 4)
+    base_notional = float(params.get("base_notional_usd", 1.0))
+    edge_multiplier = float(params.get("edge_notional_multiplier", 10.0))
+    max_notional = float(params.get("max_notional_usd", 2.0))
+    notional = min(max_notional, max(base_notional, base_notional + edge * edge_multiplier))
+    confidence = max(0.05, min(1.0, edge / max(min_edge, 1e-9)))
+    outcome = str(getattr(decision, "outcome"))
+    fair = float(getattr(decision, "model_fair", 0.0) or 0.0)
+    return SimpleNamespace(
+        market_id=market["id"],
+        outcome=outcome,
+        action="BUY",
+        price=price,
+        confidence=confidence,
+        size=round(notional / max(price, 0.01), 4),
+        reason=(
+            f"terminal_fair_value:edge={edge:.4f}; fair={fair:.4f}; ask={price:.4f}; "
+            f"asset={market.get('asset')} interval={market.get('interval_minutes')}m"
+        ),
+    )
+
+
+def _paper_market_open_probe_entry_allowed(
+    runtime: RuntimeTelemetry,
+    cfg: dict,
+    market: Dict,
+    *,
+    mode: str,
+    active_strategies: List[str],
+    executor,
+    now_ts: float,
+    gate_snapshot: Dict[str, object],
+    bucket_pause_decisions: Dict[tuple[str, str, str, str], Dict[str, object]] | None,
+    tte_bucket: str | None,
+) -> bool:
+    """Return whether the paper evidence probe may open fresh exposure.
+
+    The probe is intentionally paper-only, but it is still capital-consuming in
+    the paper ledger. It must obey the same runtime/bucket pause gates as real
+    directional strategies so negative evidence can actually stop the bleed.
+    """
+    if mode != "paper":
+        return False
+    if "market_open_probe" not in active_strategies:
+        return False
+    if executor._market_has_open_exposure(market["id"]):
+        return False
+    return _strategy_entry_allowed(
+        runtime,
+        cfg,
+        market,
+        now_ts=now_ts,
+        strategy_family="market_open_probe",
+        gate_snapshot=gate_snapshot,
+        bucket_pause_decisions=bucket_pause_decisions,
+        tte_bucket=tte_bucket,
+    )
+
+
 def _paper_market_open_probe_signal(cfg: dict, market: Dict, orderbook, market_context, loop_count: int):
     """Paper-only exploratory signal: take one bounded probe in every open interval market.
 
@@ -603,7 +690,7 @@ def _mark_directional_fired_on_fill(fill: Dict, *, time_decay=None, spot_momentu
     if fill.get("order_kind") != "signal":
         return None
     family = str(fill.get("strategy_family") or "")
-    if family not in {"mean_reversion_5min", "opening_range", "time_decay", "spot_momentum", "market_open_probe"}:
+    if family not in {"mean_reversion_5min", "opening_range", "time_decay", "spot_momentum", "market_open_probe", "terminal_fair_value"}:
         return None
     slot_id = fill.get("slot_id")
     outcome = fill.get("outcome")
@@ -974,6 +1061,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds, allow_candidate
     """Run the trading bot in specified mode."""
     from execution import PolymarketExecutor
     from tradeability_policy import assess_tradeability
+    from external_spot import SpotSnapshot
     from market_context import build_market_context
     from market_data import PolymarketData
     from risk import RiskManager
@@ -981,6 +1069,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds, allow_candidate
     from strategies.mean_reversion_5min import MeanReversion5Min
     from strategies.opening_range import OpeningRangeBreakout
     from strategies.spot_momentum import SpotMomentum
+    from strategies.terminal_fair_value import TerminalFairValueScanner
     from strategies.time_decay import TimeDecay
     from strategies.toxicity_mm import ToxicityMM
 
@@ -1079,6 +1168,7 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds, allow_candidate
             opening_range = OpeningRangeBreakout(cfg)
             time_decay = TimeDecay(cfg)
             spot_momentum = SpotMomentum(cfg)
+            terminal_fair_value = TerminalFairValueScanner(cfg)
             mm = ToxicityMM(cfg)
             spot_provider = SpotProvider()
             spot_provider.start()
@@ -1326,7 +1416,74 @@ def run(mode, strategies, max_loops, runtime_dir, sleep_seconds, allow_candidate
                                         if fired_event:
                                             runtime.append_event(fired_event.pop("event_type"), fired_event, run_id=run_id)
 
-                        if mode == "paper" and "market_open_probe" in active_strategies and not executor._market_has_open_exposure(market_id):
+                        if "terminal_fair_value" in active_strategies and _strategy_entry_allowed(
+                            runtime,
+                            cfg,
+                            market,
+                            now_ts=loop_now,
+                            strategy_family="terminal_fair_value",
+                            gate_snapshot=gate_snapshot,
+                            bucket_pause_decisions=bucket_pause_decisions,
+                            tte_bucket=market_context.tte_bucket,
+                        ):
+                            if market_context.spot_price is not None and not executor.has_strategy_market_exposure("terminal_fair_value", market_id):
+                                spot = SpotSnapshot(
+                                    asset=market_context.asset,
+                                    price=float(market_context.spot_price),
+                                    timestamp=loop_now,
+                                    source="spot_provider",
+                                )
+                                decisions = terminal_fair_value.evaluate(
+                                    market,
+                                    orderbook,
+                                    spot,
+                                    now_ts=loop_now,
+                                    run_id=run_id,
+                                )
+                                if decisions:
+                                    _emit_events(runtime, [decision.to_event() for decision in decisions], run_id=run_id)
+                                signal = _terminal_fair_value_signal_from_decisions(cfg, market, decisions)
+                                if signal:
+                                    signal.size = _bounded_directional_signal_size(
+                                        risk_mgr,
+                                        "terminal_fair_value",
+                                        signal,
+                                        reference_price=max(signal.price, 0.01),
+                                    )
+                                    if signal.size > 0:
+                                        click.echo(
+                                            f"TERMINAL FAIR VALUE: {market['slug']} {signal.outcome} {signal.action} {signal.size}@{signal.price:.4f} ({signal.reason})"
+                                        )
+                                        result = await executor.execute_signal_trade(
+                                            market,
+                                            orderbook,
+                                            signal,
+                                            strategy_family="terminal_fair_value",
+                                        )
+                                        _emit_events(runtime, result.get("events", []), run_id=run_id)
+                                        if result.get("filled"):
+                                            fired_fill = _filled_event_from_execution_result(result)
+                                            fired_event = _mark_directional_fired_on_fill(
+                                                fired_fill or result,
+                                                time_decay=time_decay,
+                                                spot_momentum=spot_momentum,
+                                                opening_range=opening_range,
+                                            )
+                                            if fired_event:
+                                                runtime.append_event(fired_event.pop("event_type"), fired_event, run_id=run_id)
+
+                        if _paper_market_open_probe_entry_allowed(
+                            runtime,
+                            cfg,
+                            market,
+                            mode=mode,
+                            active_strategies=active_strategies,
+                            executor=executor,
+                            now_ts=loop_now,
+                            gate_snapshot=gate_snapshot,
+                            bucket_pause_decisions=bucket_pause_decisions,
+                            tte_bucket=market_context.tte_bucket,
+                        ):
                             signal = _paper_market_open_probe_signal(cfg, market, orderbook, market_context, loop_count)
                             if signal:
                                 signal.size = _bounded_directional_signal_size(

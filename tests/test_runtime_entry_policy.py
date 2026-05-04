@@ -8,6 +8,7 @@ from cli import (
     _bucket_pause_status,
     _entry_gate_for_market,
     _gate_pause_decision,
+    _paper_market_open_probe_entry_allowed,
     _quote_submission_post_only,
     _runtime_gate_snapshot,
     _toxicity_mm_has_family_market_state,
@@ -243,6 +244,94 @@ class RuntimeEntryPolicyTests(unittest.TestCase):
         )
         self.assertFalse(allowed)
         self.assertIn("bucket_paused", reasons)
+
+    def test_market_open_probe_runtime_entry_uses_bucket_pause_gate(self):
+        class FakeRuntime:
+            def __init__(self):
+                self.events = []
+
+            def append_event(self, event_type, payload, **kwargs):
+                self.events.append((event_type, payload, kwargs))
+
+        class FakeExecutor:
+            def _market_has_open_exposure(self, market_id):
+                return False
+
+        market = {
+            "id": "m1",
+            "slug": "btc-updown-5m-100",
+            "asset": "btc",
+            "interval_minutes": 5,
+            "end_ts": 400.0,
+        }
+        pause_row = {
+            "family": "market_open_probe",
+            "asset": "btc",
+            "interval": "5",
+            "tte_bucket": "120-300s",
+            "settled_trades": 30,
+            "pause": True,
+            "pause_reason": "negative_pnl_per_trade<-0.010000>",
+        }
+        runtime = FakeRuntime()
+
+        allowed = _paper_market_open_probe_entry_allowed(
+            runtime,
+            {"research": {"bucket_pause_enabled": True, "bucket_pause_warn_only": False}},
+            market,
+            mode="paper",
+            active_strategies=["market_open_probe"],
+            executor=FakeExecutor(),
+            now_ts=100.0,
+            gate_snapshot={"gate_state": "GREEN", "gate_reasons": []},
+            bucket_pause_decisions={("market_open_probe", "btc", "5", "120-300s"): pause_row},
+            tte_bucket="120-300s",
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(runtime.events[0][0], "market.entry_blocked")
+        self.assertIn("bucket_paused", runtime.events[0][1]["reasons"])
+
+    def test_market_open_probe_runtime_entry_requires_paper_mode_and_no_existing_exposure(self):
+        class FakeRuntime:
+            def append_event(self, *args, **kwargs):
+                raise AssertionError("gate should not emit when preconditions fail")
+
+        class ExposedExecutor:
+            def _market_has_open_exposure(self, market_id):
+                return True
+
+        market = {"id": "m1", "slug": "btc-updown-5m-100", "asset": "btc", "interval_minutes": 5, "end_ts": 400.0}
+        gate_snapshot = {"gate_state": "GREEN", "gate_reasons": []}
+
+        self.assertFalse(
+            _paper_market_open_probe_entry_allowed(
+                FakeRuntime(),
+                {"research": {"bucket_pause_enabled": True}},
+                market,
+                mode="live",
+                active_strategies=["market_open_probe"],
+                executor=ExposedExecutor(),
+                now_ts=100.0,
+                gate_snapshot=gate_snapshot,
+                bucket_pause_decisions={},
+                tte_bucket="120-300s",
+            )
+        )
+        self.assertFalse(
+            _paper_market_open_probe_entry_allowed(
+                FakeRuntime(),
+                {"research": {"bucket_pause_enabled": True}},
+                market,
+                mode="paper",
+                active_strategies=["market_open_probe"],
+                executor=ExposedExecutor(),
+                now_ts=100.0,
+                gate_snapshot=gate_snapshot,
+                bucket_pause_decisions={},
+                tte_bucket="120-300s",
+            )
+        )
 
     def test_bucket_pause_allows_risk_reducing_orders(self):
         market = {"id": "m1", "slug": "btc-updown-5m-100", "asset": "btc", "interval_minutes": 5, "end_ts": 400.0}

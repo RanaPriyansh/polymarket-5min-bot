@@ -26,13 +26,21 @@ from exposure import build_exposure_snapshot
 logger = logging.getLogger(__name__)
 
 OPEN_LIKE_CANCELLABLE_STATUSES = {"open", "partially_filled", "acknowledged"}
-DIRECTIONAL_SIGNAL_FAMILIES = {"mean_reversion_5min", "opening_range", "time_decay", "spot_momentum", "market_open_probe"}
+DIRECTIONAL_SIGNAL_FAMILIES = {
+    "mean_reversion_5min",
+    "opening_range",
+    "time_decay",
+    "spot_momentum",
+    "market_open_probe",
+    "terminal_fair_value",
+}
 DEFAULT_DIRECTIONAL_ORDER_TTLS = {
     "time_decay": 3.0,
     "spot_momentum": 5.0,
     "opening_range": 10.0,
     "mean_reversion_5min": 10.0,
     "market_open_probe": 10.0,
+    "terminal_fair_value": 3.0,
 }
 
 

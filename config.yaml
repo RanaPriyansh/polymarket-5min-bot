@@ -48,6 +48,7 @@ execution:
     opening_range: 10
     mean_reversion_5min: 10
     market_open_probe: 10
+    terminal_fair_value: 3
   fill_policy:
     min_rest_seconds: 1.0
     max_fill_fraction_per_snapshot: 0.25
@@ -61,20 +62,17 @@ strategies:
   # bounded paper strategies across all configured 5/15m markets to collect
   # edge evidence. PAPER ONLY; live mode still requires separate approval.
   active:
-  - market_open_probe
-  - time_decay
-  - mean_reversion_5min
   - opening_range
-  - spot_momentum
+  - terminal_fair_value
   states:
     toxicity_mm: disabled
     toxicity_mm_v2: scanner_only
-    time_decay: paper_active
-    mean_reversion_5min: paper_active
+    time_decay: scanner_only
+    mean_reversion_5min: scanner_only
     opening_range: paper_active
-    spot_momentum: paper_active
-    market_open_probe: paper_active
-    terminal_fair_value: scanner_only
+    spot_momentum: scanner_only
+    market_open_probe: scanner_only
+    terminal_fair_value: paper_active
     lag_scanner: scanner_only
     complement_dislocation: scanner_only
   promotion_requires_human_approval: true
@@ -155,6 +153,28 @@ strategies:
     min_entry_price: 0.02
     max_entry_price: 0.98
     spot_move_threshold_pct: 0.02
+    directional_signal_entry_style: marketable
+    min_seconds_to_expiry_for_new_orders: 0
+  terminal_fair_value:
+    # Paper-active fair-value taker: only enters when live spot-implied terminal
+    # probability clears executable ask by a large edge. This encodes the
+    # bookmark thesis: short-window money is execution/fair-value lag, not vibes.
+    model: gbm
+    annualized_vol: 0.8
+    annualized_drift: 0.0
+    max_tte_seconds: 60
+    max_active_tte_seconds: 60
+    max_book_age_ms: 500
+    max_spot_age_ms: 1000
+    max_spread: 0.06
+    min_scanner_edge: 0.08
+    min_active_edge: 0.12
+    min_taker_edge: 0.12
+    min_entry_price: 0.02
+    max_entry_price: 0.88
+    base_notional_usd: 0.5
+    edge_notional_multiplier: 8.0
+    max_notional_usd: 2.0
     directional_signal_entry_style: marketable
     min_seconds_to_expiry_for_new_orders: 0
 runtime:

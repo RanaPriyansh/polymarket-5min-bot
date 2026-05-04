@@ -1,11 +1,12 @@
 import time
 import unittest
 
+from cli import _terminal_fair_value_signal_from_decisions
 from external_spot import SpotSnapshot
 from market_data import OrderBook
 from strategies.complement_dislocation import ComplementDislocationScanner
 from strategies.lag_scanner import LagScanner
-from strategies.terminal_fair_value import TerminalFairValueScanner
+from strategies.terminal_fair_value import ScannerDecision, TerminalFairValueScanner
 
 
 class TerminalFairValueStrategyTests(unittest.TestCase):
@@ -107,6 +108,88 @@ class TerminalFairValueStrategyTests(unittest.TestCase):
         opportunities = scanner.evaluate(self.market, orderbook)
         self.assertEqual(len(opportunities), 1)
         self.assertEqual(opportunities[0].direction, "buy_yes_buy_no")
+    def test_terminal_active_signal_selects_best_edge_and_caps_notional(self):
+        cfg = {
+            "strategies": {
+                "terminal_fair_value": {
+                    "min_active_edge": 0.10,
+                    "base_notional_usd": 1.0,
+                    "edge_notional_multiplier": 10.0,
+                    "max_notional_usd": 2.0,
+                    "max_entry_price": 0.90,
+                }
+            }
+        }
+        decisions = [
+            self._decision(outcome="Up", best_ask=0.62, model_fair=0.74, model_edge=0.12),
+            self._decision(outcome="Down", best_ask=0.41, model_fair=0.59, model_edge=0.18),
+        ]
+
+        signal = _terminal_fair_value_signal_from_decisions(cfg, self.market, decisions)
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.outcome, "Down")
+        self.assertEqual(signal.action, "BUY")
+        self.assertAlmostEqual(signal.price, 0.41)
+        self.assertAlmostEqual(signal.size, round(2.0 / 0.41, 4))
+        self.assertIn("terminal_fair_value", signal.reason)
+
+    def test_terminal_active_signal_rejects_small_edge_or_expensive_entry(self):
+        cfg = {"strategies": {"terminal_fair_value": {"min_active_edge": 0.10, "max_entry_price": 0.80}}}
+
+        self.assertIsNone(
+            _terminal_fair_value_signal_from_decisions(
+                cfg,
+                self.market,
+                [self._decision(outcome="Up", best_ask=0.50, model_fair=0.57, model_edge=0.07)],
+            )
+        )
+        self.assertIsNone(
+            _terminal_fair_value_signal_from_decisions(
+                cfg,
+                self.market,
+                [self._decision(outcome="Up", best_ask=0.91, model_fair=1.00, model_edge=0.09)],
+            )
+        )
+
+    def _decision(self, **overrides):
+        data = dict(
+            experiment_id=None,
+            run_id=None,
+            strategy_family="terminal_fair_value",
+            strategy_variant="gbm",
+            slot_id=self.market["slot_id"],
+            market_slug=self.market["slug"],
+            condition_id="condition-1",
+            token_id="token",
+            outcome="Up",
+            asset="btc",
+            timeframe="5m",
+            side="BUY",
+            order_type="scanner",
+            maker_or_taker="taker_candidate",
+            price=0.60,
+            size=0.0,
+            best_bid=0.56,
+            best_ask=0.60,
+            mid=0.58,
+            spread=0.04,
+            book_timestamp=self.now,
+            book_age_ms=10.0,
+            external_spot_source="unit-test",
+            external_spot_price=101.0,
+            external_spot_timestamp=self.now,
+            external_spot_age_ms=10.0,
+            strike_or_open_price=100.0,
+            time_to_expiry_s=30.0,
+            model_fair=0.75,
+            model_edge=0.15,
+            entry_reason="terminal_fair_value edge=0.1500 fair=0.7500 ask=0.6000",
+            vetoes_triggered=[],
+            action="scanner_only",
+        )
+        data.update(overrides)
+        return ScannerDecision(**data)
 
 
 if __name__ == "__main__":
