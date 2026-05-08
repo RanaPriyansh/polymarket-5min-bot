@@ -6,6 +6,15 @@ polymarket:
   gamma_api_url: https://gamma-api.polymarket.com
   private_key: YOUR_PRIVATE_KEY
   wallet_address: YOUR_WALLET_ADDRESS
+market_source: official_cli
+market_universe:
+  mode: all_liquid
+  max_minutes: 180
+  min_liquidity: 1000
+  limit: 200
+  active: true
+  closed: false
+  order: liquidityNum
 risk:
   circuit_breaker_dd: 0.1
   max_daily_loss: 0.05
@@ -67,7 +76,7 @@ market_filter:
   extreme_low: 0.05
   extreme_high: 0.95
 paper:
-  initial_capital: 1000.0
+  initial_capital: 100.0
   restore_state: true
   runtime_dir: data/runtime
 research:

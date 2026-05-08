@@ -1,0 +1,142 @@
+{
+  "1739838": {
+    "market_id": "1739838",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "1753632": {
+    "market_id": "1753632",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "1682614": {
+    "market_id": "1682614",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "1750517": {
+    "market_id": "1750517",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "1749870": {
+    "market_id": "1749870",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "1476618": {
+    "market_id": "1476618",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "1739839": {
+    "market_id": "1739839",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "1753593": {
+    "market_id": "1753593",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "658931": {
+    "market_id": "658931",
+    "source_family": "general",
+    "resolver": "manual_review_required",
+    "confidence": 0.2,
+    "notes": ""
+  },
+  "1507751": {
+    "market_id": "1507751",
+    "source_family": "politics",
+    "resolver": "official_election_reporting",
+    "confidence": 0.55,
+    "notes": ""
+  },
+  "566188": {
+    "market_id": "566188",
+    "source_family": "general",
+    "resolver": "manual_review_required",
+    "confidence": 0.2,
+    "notes": ""
+  },
+  "566187": {
+    "market_id": "566187",
+    "source_family": "general",
+    "resolver": "manual_review_required",
+    "confidence": 0.2,
+    "notes": ""
+  },
+  "566137": {
+    "market_id": "566137",
+    "source_family": "general",
+    "resolver": "manual_review_required",
+    "confidence": 0.2,
+    "notes": ""
+  },
+  "1682607": {
+    "market_id": "1682607",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "1750513": {
+    "market_id": "1750513",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "1749866": {
+    "market_id": "1749866",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "566136": {
+    "market_id": "566136",
+    "source_family": "general",
+    "resolver": "manual_review_required",
+    "confidence": 0.2,
+    "notes": ""
+  },
+  "1760296": {
+    "market_id": "1760296",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "1766132": {
+    "market_id": "1766132",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  },
+  "1752364": {
+    "market_id": "1752364",
+    "source_family": "sports",
+    "resolver": "official_sports_feed",
+    "confidence": 0.6,
+    "notes": ""
+  }
+}

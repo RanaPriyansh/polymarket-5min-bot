@@ -28,6 +28,7 @@ class ToxicityMM:
         self.kelly_fraction = params["kelly_fraction"]
         self.timeframes = params["timeframes"]
         self.max_position = params["max_position"]
+        self.reference_capital = float(params.get("reference_capital", config.get("paper", {}).get("initial_capital", 1000.0)))
         self.base_spread_bps = 5  # 5 bps base spread
         self.position_risk_limit = 0.1  # 10% of max position
 
@@ -75,12 +76,12 @@ class ToxicityMM:
         bid_price = mid_yes * (1 - spread/2)
         ask_price = mid_yes * (1 + spread/2)
 
-        # Size based on kelly: size = capital * fraction / (spread in price units)
         spread_price_units = (ask_price - bid_price)
         if spread_price_units == 0:
             return None, None
 
-        size = (self.kelly_fraction * 1000) / spread_price_units  # $1k risk capital example
+        notional_budget = max(self.reference_capital * self.kelly_fraction, 5.0)
+        size = notional_budget / max(mid_yes, 0.01)
         size = min(size, self.max_position)
         size = max(size, 1.0)
 

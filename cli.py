@@ -14,6 +14,7 @@ import click
 import yaml
 
 from market_filter import filter_ranked_markets, summarize_filter_results
+from market_universe import UNIVERSE_MODES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,6 +82,34 @@ def select_markets_for_trading(markets, cfg):
     return selected, summarize_filter_results(ranked)
 
 
+def runtime_universe_summary(cfg: dict):
+    universe_cfg = cfg.get("market_universe", {})
+    return {
+        "market_source": cfg.get("market_source", "official_cli"),
+        "universe_mode": universe_cfg.get("mode", "all_liquid"),
+        "max_minutes": universe_cfg.get("max_minutes"),
+        "min_liquidity": universe_cfg.get("min_liquidity"),
+        "limit": universe_cfg.get("limit"),
+    }
+
+
+async def place_mm_quotes(executor, market_id: str, quote, orderbook):
+    if executor is None or quote is None:
+        return 0
+    if hasattr(executor, "cancel_all_market"):
+        await executor.cancel_all_market(market_id)
+    submitted = 0
+    if quote.bid_size > 0:
+        await executor.place_order(market_id, quote.outcome, "BUY", quote.bid_size, quote.bid_price, post_only=True)
+        submitted += 1
+    if quote.ask_size > 0:
+        await executor.place_order(market_id, quote.outcome, "SELL", quote.ask_size, quote.ask_price, post_only=True)
+        submitted += 1
+    if hasattr(executor, 'process_orderbook'):
+        await executor.process_orderbook(market_id, orderbook)
+    return submitted
+
+
 REPO_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = REPO_ROOT / "config.yaml"
 
@@ -95,7 +124,9 @@ def cli():
 @click.option('--mode', type=click.Choice(['backtest', 'paper', 'live']), default='paper', help='Execution mode')
 @click.option('--strategies', default='mean_reversion_5min,shock_reversion,dislocation_arb,toxicity_mm', help='Comma-separated active strategies')
 @click.option('--max-loops', type=int, default=0, help='Optional loop limit for tests/smoke runs. 0 means run forever.')
-def run(mode, strategies, max_loops):
+@click.option('--universe-mode', type=click.Choice(sorted(UNIVERSE_MODES)), default=None, help='Market-universe mode override.')
+@click.option('--market-source', type=click.Choice(['official_cli', 'gamma']), default=None, help='Market discovery source override.')
+def run(mode, strategies, max_loops, universe_mode, market_source):
     """Run the trading bot in specified mode."""
     from event_recorder import EventRecorder
     from execution import create_broker
@@ -112,13 +143,19 @@ def run(mode, strategies, max_loops):
     with CONFIG_PATH.open("r", encoding="utf-8") as handle:
         cfg = yaml.safe_load(handle)
     cfg["strategies"]["active"] = strategies.split(",")
+    if market_source:
+        cfg["market_source"] = market_source
+    if universe_mode:
+        cfg.setdefault("market_universe", {})["mode"] = universe_mode
 
     paper_cfg = cfg.get("paper", {})
     runtime_dir = REPO_ROOT / paper_cfg.get("runtime_dir", "data/runtime")
     telemetry = RuntimeTelemetryStore(runtime_dir)
     run_id = RuntimeTelemetryStore.make_run_id(mode)
+    universe_summary = runtime_universe_summary(cfg)
 
     click.echo(f"Starting bot in {mode} mode with strategies: {strategies}")
+    click.echo(f"Market source: {universe_summary['market_source']} | universe: {universe_summary['universe_mode']}")
     click.echo("Press Ctrl+C to stop.")
 
     async def main_loop():
@@ -140,7 +177,7 @@ def run(mode, strategies, max_loops):
                 await executor.__aenter__()
 
             loop_count = 0
-            telemetry.append_event("runtime.started", {"run_id": run_id, "mode": mode, "strategies": cfg["strategies"]["active"]})
+            telemetry.append_event("runtime.started", {"run_id": run_id, "mode": mode, "strategies": cfg["strategies"]["active"], **universe_summary})
             telemetry.update_status(
                 run_id=run_id,
                 mode=mode,
@@ -149,19 +186,20 @@ def run(mode, strategies, max_loops):
                 markets_fetched=0,
                 markets_selected=0,
                 strategies=cfg["strategies"]["active"],
+                market_source=universe_summary["market_source"],
+                universe_mode=universe_summary["universe_mode"],
                 broker_summary={},
+                stop_reason="",
                 last_error="",
             )
 
             try:
                 while True:
                     loop_count += 1
-                    markets_5m = await md.get_markets_by_duration(minutes=5)
-                    markets_15m = await md.get_markets_by_duration(minutes=15)
-                    all_markets = merge_unique_markets(markets_5m, markets_15m)
+                    all_markets = await md.get_markets_for_universe()
                     selected_markets, filter_summary = select_markets_for_trading(all_markets, cfg)
                     click.echo(
-                        f"[{datetime.utcnow()}] Fetched {len(all_markets)} markets (5m+15m) | "
+                        f"[{datetime.utcnow()}] Fetched {len(all_markets)} markets ({universe_summary['universe_mode']}) | "
                         f"selected {len(selected_markets)} | filtered {filter_summary['filtered']}"
                     )
                     if filter_summary["top_passed"]:
@@ -347,6 +385,9 @@ def run(mode, strategies, max_loops):
                                     f"MM[{regime}]: {quote_yes.outcome} bid {quote_yes.bid_price} ask {quote_yes.ask_price} "
                                     f"size {quote_yes.bid_size}"
                                 )
+                                if executor:
+                                    placed = await place_mm_quotes(executor, market_id, quote_yes, ob)
+                                    market_order_submitted = market_order_submitted or placed > 0
 
                     positions = {}
                     if executor:
@@ -367,9 +408,12 @@ def run(mode, strategies, max_loops):
                         markets_fetched=len(all_markets),
                         markets_selected=len(selected_markets),
                         strategies=cfg["strategies"]["active"],
+                        market_source=universe_summary["market_source"],
+                        universe_mode=universe_summary["universe_mode"],
                         top_market=filter_summary["top_passed"][0] if filter_summary["top_passed"] else {},
                         broker_summary=positions,
                         risk_summary=risk_report,
+                        stop_reason="",
                         last_error="",
                     )
                     if mode == 'paper' and executor and hasattr(executor, 'snapshot_state'):
@@ -452,10 +496,12 @@ def backtest(data):
 
 
 @cli.command()
-def paper():
+@click.option('--universe-mode', type=click.Choice(sorted(UNIVERSE_MODES)), default=None, help='Market-universe mode override.')
+@click.option('--market-source', type=click.Choice(['official_cli', 'gamma']), default=None, help='Market discovery source override.')
+def paper(universe_mode, market_source):
     """Run paper trading simulation (alias for run --mode=paper)."""
     ctx = click.get_current_context()
-    ctx.invoke(run, mode='paper')
+    ctx.invoke(run, mode='paper', universe_mode=universe_mode, market_source=market_source)
 
 
 @cli.command()
@@ -474,6 +520,7 @@ def collect():
 
     with CONFIG_PATH.open("r", encoding="utf-8") as handle:
         cfg = yaml.safe_load(handle)
+    universe_summary = runtime_universe_summary(cfg)
     click.echo("Starting data collection. Press Ctrl+C to stop and save.")
 
     async def collect_loop():
@@ -481,13 +528,10 @@ def collect():
             records = []
             try:
                 while True:
-                    markets = merge_unique_markets(
-                        await md.get_markets_by_duration(minutes=5),
-                        await md.get_markets_by_duration(minutes=15),
-                    )
+                    markets = await md.get_markets_for_universe()
                     selected_markets, filter_summary = select_markets_for_trading(markets, cfg)
                     click.echo(
-                        f"[{datetime.utcnow()}] Found {len(markets)} active markets | "
+                        f"[{datetime.utcnow()}] Found {len(markets)} active markets ({universe_summary['universe_mode']}) | "
                         f"collecting {len(selected_markets)} after filters"
                     )
                     if filter_summary["top_filtered"]:

@@ -113,6 +113,21 @@ This will simulate the mean reversion strategy and print stats: win rate, Sharpe
 python cli.py run --mode paper
 ```
 
+For the current canonical runtime, market discovery now defaults to the official `polymarket` CLI. You can switch universe modes without changing code:
+
+```bash
+python cli.py run --mode paper --market-source official_cli --universe-mode strict_crypto_5m_15m
+python cli.py run --mode paper --market-source official_cli --universe-mode short_horizon_crypto
+python cli.py run --mode paper --market-source official_cli --universe-mode all_liquid
+```
+
+To launch an always-on tmux session for tonight:
+
+```bash
+./scripts/launch_paper_tmux.sh
+./scripts/runtime_snapshot.sh
+```
+
 Default paper-trading strategy set is intentionally conservative:
 - `mean_reversion_5min`
 - `shock_reversion`
