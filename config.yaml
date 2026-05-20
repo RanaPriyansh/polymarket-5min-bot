@@ -25,8 +25,6 @@ risk:
   max_daily_loss: 0.01
   max_position_size: 0.03
   max_risk_per_trade_usd: 2
-  # Paper-only exploration mode: keep collecting trade evidence after a paper
-  # risk stop would have fired. Live mode still obeys hard stops.
   paper_continue_after_risk_stop: true
 filters:
   max_book_spread_bps: 500
@@ -58,20 +56,18 @@ execution:
     max_ws_lag_ms: 1000
     cancel_latency_ms: 250
 strategies:
-  # Human-approved exploratory paper-active mode (2026-05-01): run multiple
-  # bounded paper strategies across all configured 5/15m markets to collect
-  # edge evidence. PAPER ONLY; live mode still requires separate approval.
   active:
-  - opening_range
-  - terminal_fair_value
+  - market_open_probe
+  - mean_reversion_5min
+  - time_decay
   states:
     toxicity_mm: disabled
     toxicity_mm_v2: scanner_only
-    time_decay: scanner_only
-    mean_reversion_5min: scanner_only
-    opening_range: paper_active
-    spot_momentum: scanner_only
-    market_open_probe: scanner_only
+    time_decay: paper_active
+    mean_reversion_5min: paper_active
+    opening_range: disabled
+    spot_momentum: candidate_only
+    market_open_probe: paper_active
     terminal_fair_value: paper_active
     lag_scanner: scanner_only
     complement_dislocation: scanner_only
@@ -102,16 +98,16 @@ strategies:
     max_position: 1000
     min_seconds_to_expiry_for_new_orders: 90
     quote_reprice_threshold: 0.005
-    quote_size_reduction_refresh_pct: 0.10
+    quote_size_reduction_refresh_pct: 0.1
     quote_ttl_seconds: 15
     strict_controls:
       enabled: true
       no_fresh_quotes_under_tte_seconds: 90
-      spot_veto_move_pct: 0.30
-      spot_veto_momentum: 0.60
+      spot_veto_move_pct: 0.3
+      spot_veto_momentum: 0.6
       adverse_move_pct: 0.08
       adverse_momentum: 0.15
-      adverse_size_multiplier: 0.50
+      adverse_size_multiplier: 0.5
       tte_spread_multipliers:
         early: 1.0
         mid: 1.6
@@ -137,18 +133,15 @@ strategies:
     directional_signal_entry_style: resting_limit
     min_seconds_to_expiry_for_new_orders: 0
   spot_momentum:
-    min_abs_spot_move_pct: 0.20
-    min_tte_pct: 0.20
-    max_tte_pct: 0.70
-    max_entry_price: 0.70
+    min_abs_spot_move_pct: 0.2
+    min_tte_pct: 0.2
+    max_tte_pct: 0.7
+    max_entry_price: 0.7
     base_notional_usd: 2.0
     move_notional_multiplier: 4.0
     max_notional_usd: 6.0
     directional_signal_entry_style: resting_limit
   market_open_probe:
-    # PAPER ONLY: one tiny marketable probe in every open 5m/15m market when no
-    # other strategy already has exposure. Labels data for autoresearch rather
-    # than pretending this is proven alpha.
     notional_usd: 1.0
     min_entry_price: 0.02
     max_entry_price: 0.98
@@ -156,9 +149,6 @@ strategies:
     directional_signal_entry_style: marketable
     min_seconds_to_expiry_for_new_orders: 0
   terminal_fair_value:
-    # Paper-active fair-value taker: only enters when live spot-implied terminal
-    # probability clears executable ask by a large edge. This encodes the
-    # bookmark thesis: short-window money is execution/fair-value lag, not vibes.
     model: gbm
     annualized_vol: 0.8
     annualized_drift: 0.0
@@ -192,6 +182,6 @@ research:
     min_win_rate: 0.45
     min_pnl_per_trade: 0.05
     demote_settled_trades: 20
-    demote_pnl_per_trade_below: -0.20
+    demote_pnl_per_trade_below: -0.2
 telegram:
   enabled: false
